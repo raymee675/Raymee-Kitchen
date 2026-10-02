@@ -1,0 +1,50 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "dom",
+      "dom.iterable",
+      "esnext"
+    ],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "incremental": true,
+    "paths": {
+      "@/*": [
+        "./*"
+      ]
+    },
+    "types": [
+      "node"
+    ]
+  },
+  "include": [
+    "app/kitchen.tsx",
+    "components/ui/button.tsx",
+    "components/ui/dialog.tsx",
+    "components/ui/sonner.tsx",
+    "lib/**/*.ts",
+    "pc-client/src/**/*.ts",
+    "pc-client/src/**/*.tsx",
+    "server/**/*.mjs",
+    "tests/**/*.mjs",
+    "vite.pc.config.ts",
+    "vite.pages.config.ts",
+    "pages-client/src/**/*.ts",
+    "pages-client/src/**/*.tsx"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "dist-pc",
+    "dist-pages"
+  ]
+}

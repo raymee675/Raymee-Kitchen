@@ -1,0 +1,19 @@
+node_modules/
+coverage/
+.env*
+*.tsbuildinfo
+dist/
+dist-pc/
+dist-pages/
+data-pc/
+backups/
+# Retained local Site build/runtime artifacts, excluded from the PC-only project.
+.next/
+.vinext/
+.wrangler/
+/.sites-runtime/
+/.agents/
+/.codex/
+/outputs/
+/work/
+npm-debug.log*

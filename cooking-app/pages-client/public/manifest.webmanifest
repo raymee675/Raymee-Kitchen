@@ -1,0 +1,14 @@
+{
+  "id": "./",
+  "name": "鉄板タイマー",
+  "short_name": "鉄板タイマー",
+  "description": "調理タイマーをこの端末に保存します。",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f3f5f7",
+  "theme_color": "#f3f5f7",
+  "icons": [
+    { "src": "./favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

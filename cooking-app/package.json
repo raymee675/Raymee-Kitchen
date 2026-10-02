@@ -1,0 +1,46 @@
+{
+  "name": "teppan-kitchen-timer",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=24.19.0"
+  },
+  "scripts": {
+    "dev:pc": "vite --config vite.pc.config.ts",
+    "build:pc": "vite build --config vite.pc.config.ts",
+    "build:pages": "vite build --config vite.pages.config.ts",
+    "start:pc": "node server/index.mjs",
+    "device:pc": "node server/devices.mjs",
+    "restore:pc": "node server/restore.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "test:api": "node tests/pc.integration.mjs",
+    "typecheck": "node node_modules/typescript/bin/tsc --noEmit",
+    "lint": "eslint app/kitchen.tsx components/ui/button.tsx components/ui/dialog.tsx components/ui/sonner.tsx pc-client/src pages-client/src lib server tests vite.pc.config.ts vite.pages.config.ts"
+  },
+  "dependencies": {
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "lucide-react": "^1.31.0",
+    "radix-ui": "^1.6.7",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "sonner": "^2.0.8",
+    "tailwind-merge": "3.6.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.2.1",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@typescript-eslint/eslint-plugin": "8.59.3",
+    "@typescript-eslint/parser": "8.59.3",
+    "@vitejs/plugin-react": "6.0.2",
+    "eslint": "9.39.4",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "postcss": "8.5.23",
+    "tailwindcss": "4.2.1",
+    "typescript": "5.9.3",
+    "vite": "8.0.13"
+  },
+  "type": "module"
+}
