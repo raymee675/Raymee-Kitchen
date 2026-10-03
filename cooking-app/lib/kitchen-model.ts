@@ -24,7 +24,8 @@ export function clockSample(serverNow:number, serverReceivedAt:number, elapsed:n
 }
 export type Command =
   | { operationId: string; type: "create"; id: string; plate: 1 | 2; x: number; y: number }
-  | { operationId: string; type: "start" | "remove"; id: string; expectedVersion: number }
+  | { operationId: string; type: "start" | "remove" | "delete"; id: string; expectedVersion: number }
+  | { operationId: string; type: "move"; id: string; expectedVersion: number; plate: 1 | 2; x: number; y: number }
   | { operationId: string; type: "adjust"; id: string; expectedVersion: number; delta: -1 | 1 };
 
 export function normalizePancake(item: StoredPancake): Pancake {
@@ -74,10 +75,13 @@ export function parseCommand(input: unknown): Command {
   if (c.type === "create" && (c.plate === 1 || c.plate === 2) && typeof c.x === "number" && typeof c.y === "number" && Number.isFinite(c.x) && Number.isFinite(c.y) && c.x >= 0 && c.x <= 1 && c.y >= 0 && c.y <= 1) {
     return { operationId:c.operationId, type:c.type, id:c.id, plate:c.plate, x:c.x, y:c.y };
   }
-  if ((c.type === "start" || c.type === "remove" || c.type === "adjust") && Number.isSafeInteger(c.expectedVersion) && (c.expectedVersion as number) > 0) {
+  if ((c.type === "start" || c.type === "remove" || c.type === "delete" || c.type === "adjust" || c.type === "move") && Number.isSafeInteger(c.expectedVersion) && (c.expectedVersion as number) > 0) {
     const base = { operationId:c.operationId, id:c.id, expectedVersion:c.expectedVersion as number };
-    if (c.type !== "adjust") return {...base, type:c.type};
-    if (c.delta === -1 || c.delta === 1) return {...base, type:c.type, delta:c.delta};
+    if (c.type === "start" || c.type === "remove" || c.type === "delete") return {...base, type:c.type};
+    if (c.type === "adjust" && (c.delta === -1 || c.delta === 1)) return {...base, type:c.type, delta:c.delta};
+    if (c.type === "move" && (c.plate === 1 || c.plate === 2) && typeof c.x === "number" && typeof c.y === "number" && Number.isFinite(c.x) && Number.isFinite(c.y) && c.x >= 0 && c.x <= 1 && c.y >= 0 && c.y <= 1) {
+      return {...base, type:c.type, plate:c.plate, x:c.x, y:c.y};
+    }
   }
   throw new KitchenError("invalid", "操作内容が正しくありません。", 400);
 }
@@ -94,12 +98,20 @@ export function applyCommand(items: Pancake[], command: Command, now: number): P
   if (command.type === "start" && item.startedAt !== null) return canonicalItems;
   if (item.version !== command.expectedVersion) throw new KitchenError("conflict", "別の端末で変更されました。最新の表示でもう一度操作してください。");
   const current = timer(item, now);
+  if (command.type === "delete") return canonicalItems.filter(i => i.id !== item.id);
   if (command.type === "remove") {
     if (current.state !== "done") throw new KitchenError("not_finished", "焼き上がった赤いお好み焼きをタップしてください。");
     return canonicalItems.filter(i => i.id !== item.id);
   }
   let next: Pancake;
   if (command.type === "start") next = {...item, startedAt:now, version:item.version + 1};
+  else if (command.type === "move") {
+    const position = clampPosition(command.x, command.y);
+    if (canonicalItems.some(i => i.id !== item.id && i.plate === command.plate && overlaps(i, position))) {
+      throw new KitchenError("overlap", "他の楕円と重なる位置には移動できません。");
+    }
+    next = {...item, plate:command.plate, ...position, version:item.version + 1};
+  }
   else if (command.type === "adjust") {
     if (current.state === "done") throw new KitchenError("not_running", "待機中または計測中のお好み焼きだけ温度を変更できます。");
     const temperature = item.temperature + command.delta;
