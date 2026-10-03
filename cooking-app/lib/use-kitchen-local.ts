@@ -51,11 +51,11 @@ export function useKitchenLocal() {
     alive.current = true;
     if (!lockSupported) return () => { alive.current = false; };
 
-    const lockRequest = new AbortController();
+    let disposed = false;
     let releaseLock: (() => void) | null = null;
     const lockStart = window.setTimeout(() => {
-      void navigator.locks.request(EDITOR_LOCK, { mode: "exclusive", ifAvailable: true, signal: lockRequest.signal }, async lock => {
-        if (!alive.current) return;
+      void navigator.locks.request(EDITOR_LOCK, { mode: "exclusive", ifAvailable: true }, async lock => {
+        if (disposed || !alive.current) return;
         if (!lock) {
           setConnection("offline");
           setStatusMessage("別のタブまたはホーム画面でアプリが開いています。そちらを閉じてから開き直してください。");
@@ -75,7 +75,7 @@ export function useKitchenLocal() {
         await new Promise<void>(resolve => { releaseLock = resolve; });
         activeEditor.current = false;
       }).catch(error => {
-        if (!alive.current || lockRequest.signal.aborted) return;
+        if (disposed || !alive.current) return;
         setConnection("offline");
         setStatusMessage(error instanceof Error ? `この画面を開けません。${error.message}` : "この画面を開けません。");
       });
@@ -95,10 +95,10 @@ export function useKitchenLocal() {
     window.addEventListener("storage", refreshOnStorage);
 
     return () => {
+      disposed = true;
       alive.current = false;
       activeEditor.current = false;
       window.clearTimeout(lockStart);
-      lockRequest.abort();
       releaseLock?.();
       window.clearInterval(tick);
       document.removeEventListener("visibilitychange", refreshOnResume);
