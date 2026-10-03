@@ -1,15 +1,17 @@
-import { OVAL_RX, OVAL_RY, normalizePancakes, type Pancake, type Snapshot, type StoredPancake } from "./kitchen-model";
+import { OVAL_RX, OVAL_RY, normalizeCompletionItems, normalizeExecutionRecords, normalizePancakes, type CompletionItem, type ExecutionRecord, type Pancake, type Snapshot, type StoredPancake } from "./kitchen-model";
 
 const siteSegment = typeof window === "undefined"
   ? "root"
   : encodeURIComponent(window.location.pathname.split("/").filter(Boolean)[0] ?? "root");
 export const LOCAL_BOARD_KEY = `teppan-timer:${siteSegment}:single-phone-board:v1`;
-export const LOCAL_BOARD_SCHEMA = 1;
+export const LOCAL_BOARD_SCHEMA = 3;
 
 type StoredBoard = {
   schemaVersion: number;
   revision: number;
   items: Pancake[];
+  records: ExecutionRecord[];
+  completionItems: CompletionItem[];
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -30,7 +32,7 @@ function validItem(value: unknown): value is StoredPancake {
 }
 
 function decode(raw: string | null): StoredBoard {
-  if (raw === null) return { schemaVersion: LOCAL_BOARD_SCHEMA, revision: 0, items: [] };
+  if (raw === null) return { schemaVersion: LOCAL_BOARD_SCHEMA, revision: 0, items: [], records: [], completionItems: [] };
 
   let value: unknown;
   try {
@@ -39,22 +41,34 @@ function decode(raw: string | null): StoredBoard {
     throw new Error("保存データを読み取れません。データを保護するため、盤面を初期化せず操作を停止しました。");
   }
 
-  if (!isRecord(value) || value.schemaVersion !== LOCAL_BOARD_SCHEMA
-    || !Number.isSafeInteger(value.revision) || (value.revision as number) < 0
-    || !Array.isArray(value.items) || !value.items.every(validItem)) {
+  const legacyItems = Array.isArray(value) ? value : null;
+  const schemaVersion = isRecord(value) ? value.schemaVersion : 1;
+  const revision = isRecord(value) ? value.revision : 0;
+  const rawItems = legacyItems ?? (isRecord(value) ? value.items : null);
+  const hasRecords = schemaVersion === 2 || schemaVersion === LOCAL_BOARD_SCHEMA;
+  const rawRecords = isRecord(value) && hasRecords ? value.records : [];
+  const rawCompletionItems = isRecord(value) && schemaVersion === LOCAL_BOARD_SCHEMA ? value.completionItems : [];
+  if ((!legacyItems && (!isRecord(value) || (schemaVersion !== 1 && schemaVersion !== 2 && schemaVersion !== LOCAL_BOARD_SCHEMA)))
+    || !Number.isSafeInteger(revision) || (revision as number) < 0
+    || !Array.isArray(rawItems) || !rawItems.every(validItem)
+    || (hasRecords && !Array.isArray(rawRecords))
+    || (schemaVersion === LOCAL_BOARD_SCHEMA && !Array.isArray(rawCompletionItems))) {
     throw new Error("保存データの形式が現在のアプリに対応していません。データを保護するため、操作を停止しました。");
   }
 
   const ids = new Set<string>();
-  for (const item of value.items) {
+  for (const item of rawItems) {
     if (ids.has(item.id)) throw new Error("保存データに重複したIDがあります。データを保護するため、操作を停止しました。");
     ids.add(item.id);
   }
 
+  const records = normalizeExecutionRecords(rawRecords);
   return {
     schemaVersion: LOCAL_BOARD_SCHEMA,
-    revision: value.revision as number,
-    items: normalizePancakes(value.items),
+    revision: revision as number,
+    items: normalizePancakes(rawItems),
+    records,
+    completionItems: normalizeCompletionItems(rawCompletionItems, records),
   };
 }
 
@@ -73,14 +87,17 @@ export function readLocalBoard(storage: BoardStorage = window.localStorage): Sna
       }
     }
   }
-  return { revision: stored.revision, items: stored.items, serverNow: Date.now() };
+  return { revision: stored.revision, items: stored.items, records:stored.records, completionItems:stored.completionItems, serverNow: Date.now() };
 }
 
 export function writeLocalBoard(snapshot: Snapshot, storage: Pick<Storage, "setItem"> = window.localStorage): void {
+  const records = normalizeExecutionRecords(snapshot.records ?? []);
   const stored: StoredBoard = {
     schemaVersion: LOCAL_BOARD_SCHEMA,
     revision: snapshot.revision,
     items: normalizePancakes(snapshot.items),
+    records,
+    completionItems: normalizeCompletionItems(snapshot.completionItems ?? [], records),
   };
   storage.setItem(LOCAL_BOARD_KEY, JSON.stringify(stored));
 }

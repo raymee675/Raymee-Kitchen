@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
-import { applyCommand, KitchenError, normalizePancakes, parseCommand } from "../lib/kitchen-model.ts";
+import { applySnapshotCommand, KitchenError, normalizeCompletionItems, normalizeExecutionRecords, normalizePancakes, parseCommand } from "../lib/kitchen-model.ts";
 
 const defaultDatabasePath = fileURLToPath(new URL("../data-pc/kitchen.sqlite", import.meta.url));
 const file = resolve(process.env.KITCHEN_DB_PATH || defaultDatabasePath);
@@ -47,22 +47,34 @@ function readBoard() {
   return row;
 }
 
-function migrateBoardItems() {
+function readBoardState(serialized) {
+  const decoded = JSON.parse(serialized);
+  const legacy = Array.isArray(decoded);
+  if (!legacy && (!decoded || typeof decoded !== "object" || Array.isArray(decoded) || !Array.isArray(decoded.items))) {
+    throw new Error("Board state has an invalid format");
+  }
+  const items = normalizePancakes(legacy ? decoded : decoded.items);
+  const records = normalizeExecutionRecords(legacy ? [] : decoded.records === undefined ? [] : decoded.records);
+  const completionItems = normalizeCompletionItems(legacy || decoded.completionItems === undefined ? [] : decoded.completionItems, records);
+  return {items, records, completionItems};
+}
+
+function migrateBoardState() {
   const row = readBoard();
-  const items = normalizePancakes(JSON.parse(row.state));
-  const state = JSON.stringify(items);
+  const state = JSON.stringify(readBoardState(row.state));
   if (state !== row.state) {
-    // Canonicalize legacy per-item durations and supply the default temperature
-    // without changing board revision or item versions.
+    // Convert the legacy item array to an atomic items/records envelope,
+    // preserving active items and marking their untracked heat as unknown.
     database.prepare("UPDATE boards SET state = ? WHERE id = 'main' AND revision = ?").run(state, row.revision);
   }
 }
-migrateBoardItems();
+migrateBoardState();
 
 export function readSnapshot() {
   const serverReceivedAt = Date.now();
   const row = readBoard();
-  return { revision: row.revision, items: normalizePancakes(JSON.parse(row.state)), serverReceivedAt, serverNow: Date.now() };
+  const board = readBoardState(row.state);
+  return { revision: row.revision, ...board, serverReceivedAt, serverNow: Date.now() };
 }
 
 export function executeCommand(input, actor) {
@@ -83,12 +95,12 @@ export function executeCommand(input, actor) {
 
     const row = readBoard();
     const receivedAt = Date.now();
-    const items = applyCommand(JSON.parse(row.state), command, receivedAt);
+    const nextBoard = applySnapshotCommand(readBoardState(row.state), command, receivedAt);
     const revision = row.revision + 1;
     database.prepare("INSERT INTO operations (id, actor, request_hash, applied_revision, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(command.operationId, actor, requestHash, revision, receivedAt);
     database.prepare("UPDATE boards SET state = ?, revision = ?, updated_at = ? WHERE id = 'main' AND revision = ?")
-      .run(JSON.stringify(items), revision, receivedAt, row.revision);
+      .run(JSON.stringify({items:nextBoard.items, records:nextBoard.records, completionItems:nextBoard.completionItems}), revision, receivedAt, row.revision);
     const snapshot = readSnapshot();
     database.exec("COMMIT");
     return { ...snapshot, operationId: command.operationId, appliedRevision: revision };

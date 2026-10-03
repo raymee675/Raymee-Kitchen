@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { applyCommand, parseCommand, type Command, type Snapshot } from "./kitchen-model";
+import { applySnapshotCommand, parseCommand, type Command, type Snapshot } from "./kitchen-model";
 import { LOCAL_BOARD_KEY, readLocalBoard, writeLocalBoard } from "./local-kitchen-storage";
 
 const EDITOR_LOCK = `${LOCAL_BOARD_KEY}:editor`;
@@ -157,10 +157,14 @@ export function useKitchenLocal() {
     const operation = mutationQueue.current.then(() => {
       if (!activeEditor.current) throw new Error("操作を保存できません。アプリを開き直してください。");
       const current = readLocalBoard();
+      const now = Date.now();
+      const applied = applySnapshotCommand(current, command, now);
       const next: Snapshot = {
         revision: current.revision + 1,
-        items: applyCommand(current.items, command, Date.now()),
-        serverNow: Date.now(),
+        items: applied.items,
+        records: applied.records,
+        completionItems: applied.completionItems,
+        serverNow: now,
       };
       writeLocalBoard(next);
       publish(next);
