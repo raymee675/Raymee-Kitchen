@@ -2,19 +2,21 @@
 // expressing its horizontal radius as a fraction of the wider board.
 export const OVAL_RX = 0.07875;
 export const OVAL_RY = 0.095;
-export const DEFAULT_DURATION = 100;
-export const MIN_DURATION = 90;
-export const MAX_DURATION = 110;
+export const TIMER_DURATION = 90;
+export const DEFAULT_TEMPERATURE = 96;
 
 export interface Pancake {
   id: string;
   plate: 1 | 2;
   x: number;
   y: number;
+  // Kept in the stored/API shape for older clients, but canonicalized to 90.
   duration: number;
+  temperature: number;
   startedAt: number | null;
   version: number;
 }
+export type StoredPancake = Omit<Pancake, "temperature"> & { temperature?: number };
 export interface Snapshot { revision: number; items: Pancake[]; serverNow: number; serverReceivedAt?: number }
 export function clockSample(serverNow:number, serverReceivedAt:number, elapsed:number) {
   const networkRtt = Math.max(0, elapsed - Math.max(0, serverNow - serverReceivedAt));
@@ -25,17 +27,31 @@ export type Command =
   | { operationId: string; type: "start" | "remove"; id: string; expectedVersion: number }
   | { operationId: string; type: "adjust"; id: string; expectedVersion: number; delta: -1 | 1 };
 
+export function normalizePancake(item: StoredPancake): Pancake {
+  return {
+    ...item,
+    duration: TIMER_DURATION,
+    temperature: item.temperature !== undefined && Number.isSafeInteger(item.temperature)
+      ? item.temperature
+      : DEFAULT_TEMPERATURE,
+  };
+}
+
+export function normalizePancakes(items: readonly StoredPancake[]): Pancake[] {
+  return items.map(normalizePancake);
+}
+
 export class KitchenError extends Error {
   code: string;
   status: number;
   constructor(code: string, message: string, status = 409) { super(message); this.code=code; this.status=status; }
 }
 export function timer(item: Pancake, now: number) {
-  if (item.startedAt === null) return { state: "blank" as const, remaining: item.duration, progress: 0 };
-  const remainingMs = Math.max(0, item.startedAt + item.duration * 1000 - now);
+  if (item.startedAt === null) return { state: "blank" as const, remaining: TIMER_DURATION, progress: 0 };
+  const remainingMs = Math.max(0, item.startedAt + TIMER_DURATION * 1000 - now);
   return { state: remainingMs === 0 ? "done" as const : "running" as const,
     remaining: Math.ceil(remainingMs / 1000),
-    progress: Math.min(1, Math.max(0, (now - item.startedAt) / (item.duration * 1000))) };
+    progress: Math.min(1, Math.max(0, (now - item.startedAt) / (TIMER_DURATION * 1000))) };
 }
 export function clampPosition(x: number, y: number) {
   return { x: Math.max(OVAL_RX + 0.02, Math.min(1 - OVAL_RX - 0.02, x)),
@@ -66,28 +82,29 @@ export function parseCommand(input: unknown): Command {
   throw new KitchenError("invalid", "操作内容が正しくありません。", 400);
 }
 export function applyCommand(items: Pancake[], command: Command, now: number): Pancake[] {
+  const canonicalItems = normalizePancakes(items);
   if (command.type === "create") {
-    if (items.some(i => i.id === command.id)) throw new KitchenError("exists", "すでに追加されています。");
+    if (canonicalItems.some(i => i.id === command.id)) throw new KitchenError("exists", "すでに追加されています。");
     const position = clampPosition(command.x, command.y);
-    if (items.some(i => i.plate === command.plate && overlaps(i, position))) throw new KitchenError("overlap", "少し離れた空き場所をタップしてください。");
-    return [...items, {id:command.id, plate:command.plate, ...position, duration:DEFAULT_DURATION, startedAt:null, version:1}];
+    if (canonicalItems.some(i => i.plate === command.plate && overlaps(i, position))) throw new KitchenError("overlap", "少し離れた空き場所をタップしてください。");
+    return [...canonicalItems, {id:command.id, plate:command.plate, ...position, duration:TIMER_DURATION, temperature:DEFAULT_TEMPERATURE, startedAt:null, version:1}];
   }
-  const item = items.find(i => i.id === command.id);
+  const item = canonicalItems.find(i => i.id === command.id);
   if (!item) throw new KitchenError("removed", "このお好み焼きは取り出されています。");
-  if (command.type === "start" && item.startedAt !== null) return items;
+  if (command.type === "start" && item.startedAt !== null) return canonicalItems;
   if (item.version !== command.expectedVersion) throw new KitchenError("conflict", "別の端末で変更されました。最新の表示でもう一度操作してください。");
   const current = timer(item, now);
   if (command.type === "remove") {
     if (current.state !== "done") throw new KitchenError("not_finished", "焼き上がった赤いお好み焼きをタップしてください。");
-    return items.filter(i => i.id !== item.id);
+    return canonicalItems.filter(i => i.id !== item.id);
   }
   let next: Pancake;
   if (command.type === "start") next = {...item, startedAt:now, version:item.version + 1};
   else if (command.type === "adjust") {
-    if (current.state === "done") throw new KitchenError("not_running", "待機中または計測中のお好み焼きだけ時間を変更できます。");
-    const duration = item.duration + command.delta;
-    if (duration < MIN_DURATION || duration > MAX_DURATION) throw new KitchenError("duration_limit", "設定できる時間は90〜110秒です。");
-    next = {...item, duration, version:item.version + 1};
+    if (current.state === "done") throw new KitchenError("not_running", "待機中または計測中のお好み焼きだけ温度を変更できます。");
+    const temperature = item.temperature + command.delta;
+    if (!Number.isSafeInteger(temperature)) throw new KitchenError("temperature_limit", "これ以上温度を変更できません。");
+    next = {...item, temperature, version:item.version + 1};
   } else throw new KitchenError("invalid", "操作内容が正しくありません。", 400);
-  return items.map(i => i.id === item.id ? next : i);
+  return canonicalItems.map(i => i.id === item.id ? next : i);
 }

@@ -79,11 +79,11 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    const register = (tool:Record<string,unknown>) => {
      try { void Promise.resolve(context.registerTool(tool,{signal:lifecycle.signal})).catch(()=>{}); } catch {}
    };
-   register({name:"read_kitchen",title:"鉄板の状態を確認",description:"共有されている2枚の鉄板と、お好み焼きの位置・設定時間・開始時刻を取得します。",inputSchema:{type:"object",properties:{},additionalProperties:false},annotations:{readOnlyHint:true},execute:async()=>{
+   register({name:"read_kitchen",title:"鉄板の状態を確認",description:"共有されている2枚の鉄板と、お好み焼きの位置・温度・固定90秒タイマーの開始時刻を取得します。",inputSchema:{type:"object",properties:{},additionalProperties:false},annotations:{readOnlyHint:true},execute:async()=>{
      await actions.current.sync();
      return actions.current.getSnapshot();
    }});
-   register({name:"operate_kitchen",title:"お好み焼きを操作",description:"楕円の追加(create)、計測開始(start)、設定を1秒変更(adjust)、終了済みの削除(remove)を実行します。画面と同じ共有データを変更します。operationIdと新規idはUUID v4、既存楕円の操作には取得したversionをexpectedVersionで指定します。",inputSchema:{type:"object",properties:{operationId:{type:"string"},type:{enum:["create","start","adjust","remove"]},id:{type:"string"},plate:{enum:[1,2]},x:{type:"number",minimum:0,maximum:1},y:{type:"number",minimum:0,maximum:1},expectedVersion:{type:"integer",minimum:1},delta:{enum:[-1,1]}},required:["operationId","type","id"],additionalProperties:false},annotations:{readOnlyHint:false},execute:async(input:unknown)=>{
+   register({name:"operate_kitchen",title:"お好み焼きを操作",description:"楕円の追加(create)、固定90秒計測の開始(start)、温度を1℃変更(adjust)、終了済みの削除(remove)を実行します。画面と同じ共有データを変更します。operationIdと新規idはUUID v4、既存楕円の操作には取得したversionをexpectedVersionで指定します。",inputSchema:{type:"object",properties:{operationId:{type:"string"},type:{enum:["create","start","adjust","remove"]},id:{type:"string"},plate:{enum:[1,2]},x:{type:"number",minimum:0,maximum:1},y:{type:"number",minimum:0,maximum:1},expectedVersion:{type:"integer",minimum:1},delta:{enum:[-1,1]}},required:["operationId","type","id"],additionalProperties:false},annotations:{readOnlyHint:false},execute:async(input:unknown)=>{
      const command = parseCommand(input);
      const result = await actions.current.send(command);
      return {revision:result.revision,items:result.items};
@@ -92,7 +92,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  },[]);
 
  const run = (command:Command) => { void send(command).then(result=>{
-   if(command.type==="adjust") { const item=result.items.find(i=>i.id===command.id); if(item) toast.success(`設定を${item.duration}秒に変更しました。`,{duration:1800}); }
+   if(command.type==="adjust") { const item=result.items.find(i=>i.id===command.id); if(item) toast.success(`温度を${item.temperature}℃に変更しました。`,{duration:1800}); }
  }).catch(()=>{}); };
  function perform(item:Pancake, action:string) {
    const current = timer(item,kitchen.currentTime());
@@ -142,10 +142,10 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  <header className="topbar"><div className="brand"><span className="brand-icon"><Flame size={23}/></span><div><h1>鉄板タイマー</h1><p>TEPPAN TIMER</p></div></div><div className="top-actions"><span className={`connection ${connection}`} role="status">{connectionLabel}</span>
  {__PAGES_MODE__&&counts.running>0&&<span className={`wake-indicator ${wakeLock}`} role="status">{wakeLock==="active"?"画面を点灯中":"端末設定で消灯を延長"}</span>}
  {__PAGES_MODE__&&kitchen.updateReady&&<button className="update-button" disabled={counts.running>0} onClick={()=>kitchen.applyUpdate?.()}>{counts.running>0?"調理後に更新":"更新を適用"}</button>}
- <Dialog open={help} onOpenChange={setHelp}><DialogTrigger asChild><button className="icon-button" aria-label="使い方"><CircleHelp size={21}/></button></DialogTrigger><DialogContent><DialogHeader><DialogTitle>鉄板タイマーの使い方</DialogTitle><DialogDescription>{__PAGES_MODE__?"調理状態は、このスマホのブラウザー内だけに保存されます。":"同じ画面を開いたスマホで、調理の状態を共有できます。"}</DialogDescription></DialogHeader>
- <ol className="help-list"><li>鉄板の空いている場所をタップすると、白い楕円が置かれます。</li><li>白い楕円をタップすると、100秒で計測が始まります。</li><li>楕円の左右にある矢印をタップして、待機中・計測中の設定時間を1秒ずつ変更できます（90〜110秒）。</li><li>上から白くなり、0秒で全体が赤くなります。赤い楕円をタップして取り出します。</li></ol>
- <p className="help-note">時間調整で開始時刻は変わりません。調理中は画面を表示してご利用ください。{__PAGES_MODE__?"画面ロック中の通知はありません。":"未接続の間は表示のみとなります。"}</p>
- <p className="help-note">パソコン：Tabで楕円を選択、Enterで開始、左右キーで調整、上キーで取り出し。</p>
+ <Dialog open={help} onOpenChange={setHelp}><DialogTrigger asChild><button className="icon-button" aria-label="使い方"><CircleHelp size={21}/></button></DialogTrigger><DialogContent className="help-dialog"><DialogHeader><DialogTitle>鉄板タイマーの使い方</DialogTitle><DialogDescription>{__PAGES_MODE__?"調理状態は、このスマホのブラウザー内だけに保存されます。":"同じ画面を開いたスマホで、調理の状態を共有できます。"}</DialogDescription></DialogHeader>
+ <ol className="help-list"><li>鉄板の空いている場所をタップすると、白い楕円が置かれます。</li><li>白い楕円をタップすると、90秒で計測が始まります。</li><li>楕円の左右にある矢印をタップして、待機中・計測中の温度を1℃ずつ変更できます。初期温度は96℃です。</li><li>計測時間は常に90秒です。上から白くなり、0秒で全体が赤くなります。赤い楕円をタップして取り出します。</li></ol>
+ <p className="help-note">温度を変更してもタイマーは90秒のままです。調理中は画面を表示してご利用ください。{__PAGES_MODE__?"画面ロック中の通知はありません。":"未接続の間は表示のみとなります。"}</p>
+ <p className="help-note">パソコン：Tabで楕円を選択、Enterで開始、左右キーで温度を1℃調整、上キーで取り出し。</p>
   <p className="help-note">PC版は通常のブラウザーで利用します。画面ロック中の通知はありません。</p>
  <button className="help-done" onClick={()=>setHelp(false)}>わかりました</button></DialogContent></Dialog>
  </div></header>
@@ -163,19 +163,19 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    {plateItems.map(item=>{
      const t=timer(item,now); const cx=item.x*1600,cy=item.y*900,rx=OVAL_RX*1600,ry=OVAL_RY*900;
      const busy=pendingIds.has(item.id);
-     return <g key={item.id} data-item-id={item.id} data-state={t.state} data-duration={item.duration} data-version={item.version} className={`oval ${busy?"pending":""}`}>
+     return <g key={item.id} data-item-id={item.id} data-state={t.state} data-duration="90" data-temperature={item.temperature} data-version={item.version} className={`oval ${busy?"pending":""}`}>
        <defs><clipPath id={`clip-${item.id}`}><ellipse cx={cx} cy={cy} rx={rx} ry={ry}/></clipPath></defs>
-       <ellipse role="button" tabIndex={0} aria-disabled={!available||busy} aria-label={`お好み焼き ${t.state==="blank"?"待機、タップで開始":t.state==="done"?"焼き上がり、タップで取り出し":`残り${t.remaining}秒、設定時間${item.duration}秒`}`} cx={cx} cy={cy} rx={rx} ry={ry} fill={t.state==="done"?"#e13b3b":t.state==="blank"?"#fff":"#0c0d0f"} stroke={pressed===item.id?"#ffb276":"#92989f"} strokeWidth={pressed===item.id?9:4} onKeyDown={e=>keyboard(e,item)}/>
+       <ellipse role="button" tabIndex={0} aria-disabled={!available||busy} aria-label={`お好み焼き ${t.state==="blank"?`待機中、温度${item.temperature}度、タップで90秒の計測を開始`:t.state==="done"?`焼き上がり、温度${item.temperature}度、タップで取り出し`:`残り${t.remaining}秒、温度${item.temperature}度`}`} cx={cx} cy={cy} rx={rx} ry={ry} fill={t.state==="done"?"#e13b3b":t.state==="blank"?"#fff":"#0c0d0f"} stroke={pressed===item.id?"#ffb276":"#92989f"} strokeWidth={pressed===item.id?9:4} onKeyDown={e=>keyboard(e,item)}/>
        {t.state==="running"&&<rect x={cx-rx} y={cy-ry} width={rx*2} height={ry*2*t.progress} fill="#fff" clipPath={`url(#clip-${item.id})`} pointerEvents="none"/>}
-       <text x={cx} y={cy-4} textAnchor="middle" className="oval-duration" fontSize="30" fill={t.state==="blank"?"#636d77":t.state==="done"?"#fff":t.progress>0.52?"#353b41":"#ffffff"} pointerEvents="none">{item.duration}秒</text>
+       <text x={cx} y={cy-4} textAnchor="middle" className="oval-temperature" fontSize="30" fill={t.state==="blank"?"#636d77":t.state==="done"?"#fff":t.progress>0.52?"#353b41":"#ffffff"} pointerEvents="none">{item.temperature}℃</text>
        {t.state!=="blank"&&<text x={cx} y={cy+49} textAnchor="middle" className="oval-number" fontSize="66" fill={t.state==="done"?"#fff":t.progress>0.79?"#16191e":"#fff"} pointerEvents="none">{t.remaining}</text>}
        {t.state!=="done"&&<>
-         <g role="button" tabIndex={0} aria-label="設定時間を1秒短くする" aria-disabled={!available||busy} data-item-action="left" className="oval-arrow" onKeyDown={e=>keyboard(e,item,"left")}>
+         <g role="button" tabIndex={0} aria-label="温度を1℃下げる" aria-disabled={!available||busy} data-item-action="left" className="oval-arrow" onKeyDown={e=>keyboard(e,item,"left")}>
            <rect x={cx-rx} y={cy-ry} width="64" height={ry*2} fill="transparent" pointerEvents="all"/>
            <rect x={cx-rx+13} y={cy-38} width="46" height="76" rx="14" fill="#d94f16" pointerEvents="none"/>
            <path d={`M ${cx-rx+43} ${cy-17} l -17 17 17 17`} fill="none" stroke="#fff" strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" pointerEvents="none"/>
          </g>
-         <g role="button" tabIndex={0} aria-label="設定時間を1秒長くする" aria-disabled={!available||busy} data-item-action="right" className="oval-arrow" onKeyDown={e=>keyboard(e,item,"right")}>
+         <g role="button" tabIndex={0} aria-label="温度を1℃上げる" aria-disabled={!available||busy} data-item-action="right" className="oval-arrow" onKeyDown={e=>keyboard(e,item,"right")}>
            <rect x={cx+rx-64} y={cy-ry} width="64" height={ry*2} fill="transparent" pointerEvents="all"/>
            <rect x={cx+rx-59} y={cy-38} width="46" height="76" rx="14" fill="#d94f16" pointerEvents="none"/>
            <path d={`M ${cx+rx-43} ${cy-17} l 17 17 -17 17`} fill="none" stroke="#fff" strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" pointerEvents="none"/>
@@ -188,7 +188,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    {!plateItems.length&&<div className="empty-plate">{snapshot?<Plus size={30} strokeWidth={1}/>:<LoaderCircle className="animate-spin" size={25}/>}<span>{snapshot?"タップして置く":__PAGES_MODE__?"保存データを読み込み中":"共有データを読み込み中"}</span></div>}
    </div></article>;
  })}</section>
- <footer className="guide"><div><span className="guide-mark">1</span><span>空白をタップ<b>計測スタート</b></span></div><div><span className="guide-arrows"><ArrowLeft size={19}/><ArrowRight size={19}/></span><span>左右の矢印をタップ<b>90〜110秒に調整</b></span></div><div><span className="guide-red-dot" aria-hidden="true"/><span>赤い楕円をタップ<b>取り出す</b></span></div></footer>
+ <footer className="guide"><div><span className="guide-mark">1</span><span>空白をタップ<b>90秒計測スタート</b></span></div><div><span className="guide-arrows"><ArrowLeft size={19}/><ArrowRight size={19}/></span><span>左右の矢印をタップ<b>温度を1℃調整</b></span></div><div><span className="guide-red-dot" aria-hidden="true"/><span>赤い楕円をタップ<b>取り出す</b></span></div></footer>
  </main>;
 }
 

@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
-import { applyCommand, KitchenError, parseCommand } from "../lib/kitchen-model.ts";
+import { applyCommand, KitchenError, normalizePancakes, parseCommand } from "../lib/kitchen-model.ts";
 
 const defaultDatabasePath = fileURLToPath(new URL("../data-pc/kitchen.sqlite", import.meta.url));
 const file = resolve(process.env.KITCHEN_DB_PATH || defaultDatabasePath);
@@ -47,10 +47,22 @@ function readBoard() {
   return row;
 }
 
+function migrateBoardItems() {
+  const row = readBoard();
+  const items = normalizePancakes(JSON.parse(row.state));
+  const state = JSON.stringify(items);
+  if (state !== row.state) {
+    // Canonicalize legacy per-item durations and supply the default temperature
+    // without changing board revision or item versions.
+    database.prepare("UPDATE boards SET state = ? WHERE id = 'main' AND revision = ?").run(state, row.revision);
+  }
+}
+migrateBoardItems();
+
 export function readSnapshot() {
   const serverReceivedAt = Date.now();
   const row = readBoard();
-  return { revision: row.revision, items: JSON.parse(row.state), serverReceivedAt, serverNow: Date.now() };
+  return { revision: row.revision, items: normalizePancakes(JSON.parse(row.state)), serverReceivedAt, serverNow: Date.now() };
 }
 
 export function executeCommand(input, actor) {

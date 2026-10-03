@@ -1,4 +1,4 @@
-import { MAX_DURATION, MIN_DURATION, OVAL_RX, OVAL_RY, type Pancake, type Snapshot } from "./kitchen-model";
+import { OVAL_RX, OVAL_RY, normalizePancakes, type Pancake, type Snapshot, type StoredPancake } from "./kitchen-model";
 
 const siteSegment = typeof window === "undefined"
   ? "root"
@@ -16,14 +16,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function validItem(value: unknown): value is Pancake {
+function validItem(value: unknown): value is StoredPancake {
   if (!isRecord(value)) return false;
   return typeof value.id === "string"
     && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.id)
     && (value.plate === 1 || value.plate === 2)
     && typeof value.x === "number" && Number.isFinite(value.x) && value.x >= OVAL_RX + 0.02 && value.x <= 1 - OVAL_RX - 0.02
     && typeof value.y === "number" && Number.isFinite(value.y) && value.y >= OVAL_RY + 0.02 && value.y <= 1 - OVAL_RY - 0.02
-    && typeof value.duration === "number" && Number.isSafeInteger(value.duration) && value.duration >= MIN_DURATION && value.duration <= MAX_DURATION
+    && typeof value.duration === "number" && Number.isSafeInteger(value.duration)
+    && (value.temperature === undefined || (typeof value.temperature === "number" && Number.isSafeInteger(value.temperature)))
     && (value.startedAt === null || (typeof value.startedAt === "number" && Number.isFinite(value.startedAt) && value.startedAt >= 0))
     && typeof value.version === "number" && Number.isSafeInteger(value.version) && value.version >= 1;
 }
@@ -50,11 +51,28 @@ function decode(raw: string | null): StoredBoard {
     ids.add(item.id);
   }
 
-  return { schemaVersion: LOCAL_BOARD_SCHEMA, revision: value.revision as number, items: value.items };
+  return {
+    schemaVersion: LOCAL_BOARD_SCHEMA,
+    revision: value.revision as number,
+    items: normalizePancakes(value.items),
+  };
 }
 
-export function readLocalBoard(storage: Pick<Storage, "getItem"> = window.localStorage): Snapshot {
-  const stored = decode(storage.getItem(LOCAL_BOARD_KEY));
+type BoardStorage = Pick<Storage, "getItem"> & Partial<Pick<Storage, "setItem">>;
+
+export function readLocalBoard(storage: BoardStorage = window.localStorage): Snapshot {
+  const raw = storage.getItem(LOCAL_BOARD_KEY);
+  const stored = decode(raw);
+  if (raw !== null && storage.setItem) {
+    const canonical = JSON.stringify(stored);
+    if (raw !== canonical) {
+      try {
+        storage.setItem(LOCAL_BOARD_KEY, canonical);
+      } catch {
+        // A failed opportunistic migration must not hide a readable saved board.
+      }
+    }
+  }
   return { revision: stored.revision, items: stored.items, serverNow: Date.now() };
 }
 
@@ -62,7 +80,7 @@ export function writeLocalBoard(snapshot: Snapshot, storage: Pick<Storage, "setI
   const stored: StoredBoard = {
     schemaVersion: LOCAL_BOARD_SCHEMA,
     revision: snapshot.revision,
-    items: snapshot.items,
+    items: normalizePancakes(snapshot.items),
   };
   storage.setItem(LOCAL_BOARD_KEY, JSON.stringify(stored));
 }

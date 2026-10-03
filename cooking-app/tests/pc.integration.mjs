@@ -108,7 +108,15 @@ try {
 
   const legacyAccess=await requestAt(deviceIp,"/api/board",{headers:{Cookie:`teppan_device=${legacyToken}`}});
   assert.equal(legacyAccess.status,200,"existing device sessions remain valid after DB migration");
-  assert.ok(JSON.parse(legacyAccess.text).items.some(item=>item.id===existingItem.id),"saved board state must survive schema migration");
+  const migratedBoard=JSON.parse(legacyAccess.text);
+  const migratedItem=migratedBoard.items.find(item=>item.id===existingItem.id);
+  assert.ok(migratedItem,"saved board state must survive schema migration");
+  assert.equal(migratedBoard.revision,7,"board revision must survive item normalization");
+  assert.equal(migratedItem.duration,90,"legacy timer duration is normalized to the fixed duration");
+  assert.equal(migratedItem.temperature,96,"legacy items receive the default temperature");
+  assert.deepEqual({plate:migratedItem.plate,x:migratedItem.x,y:migratedItem.y,startedAt:migratedItem.startedAt,version:migratedItem.version},
+    {plate:existingItem.plate,x:existingItem.x,y:existingItem.y,startedAt:existingItem.startedAt,version:existingItem.version},
+    "legacy item position and state must survive normalization");
 
   const enrollment=await requestAt(deviceIp,"/api/enroll",{method:"POST",headers:{Origin:mobileOrigin,"Content-Type":"application/json"},body:JSON.stringify({code:issued.code,label:"テストスマホ"})});
   assert.equal(enrollment.status,200); const setCookie=enrollment.headers["set-cookie"]; const cookie=(Array.isArray(setCookie)?setCookie[0]:setCookie)?.split(";")[0]; assert.ok(cookie);
@@ -117,7 +125,10 @@ try {
   const createdId=randomUUID();
   const command={operationId:randomUUID(),type:"create",id:createdId,plate:2,x:0.2,y:0.2};
   const changed=await requestAt(deviceIp,"/api/board",{method:"POST",headers:{Cookie:cookie,Origin:mobileOrigin,"Content-Type":"application/json"},body:JSON.stringify(command)});
-  assert.equal(changed.status,200); assert.ok(JSON.parse(changed.text).items.some(item=>item.id===createdId));
+  assert.equal(changed.status,200);
+  const createdItem=JSON.parse(changed.text).items.find(item=>item.id===createdId);
+  assert.ok(createdItem);
+  assert.equal(createdItem.duration,90); assert.equal(createdItem.temperature,96);
 
   const deviceId=JSON.parse(enrollment.text).deviceId;
   const revoked=await requestAt("127.0.0.1",`/api/admin/devices/${deviceId}/revoke`,{method:"POST",headers:{Origin:localOrigin,"Content-Type":"application/json"},body:"{}"});
