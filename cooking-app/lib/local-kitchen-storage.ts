@@ -1,17 +1,20 @@
-import { OVAL_RX, OVAL_RY, normalizeCompletionItems, normalizeExecutionRecords, normalizePancakes, type CompletionItem, type ExecutionRecord, type Pancake, type Snapshot, type StoredPancake } from "./kitchen-model";
+import { INITIAL_BOARD_GENERATION, LEGACY_OVAL_RX, LEGACY_OVAL_RY, isPancakeId, normalizeBoardData, type CompletionItem, type ExecutionRecord, type Pancake, type Snapshot, type StoredPancake, type UndoEntry } from "./kitchen-model";
 
 const siteSegment = typeof window === "undefined"
   ? "root"
   : encodeURIComponent(window.location.pathname.split("/").filter(Boolean)[0] ?? "root");
 export const LOCAL_BOARD_KEY = `teppan-timer:${siteSegment}:single-phone-board:v1`;
-export const LOCAL_BOARD_SCHEMA = 3;
+export const LOCAL_BOARD_SCHEMA = 6;
 
 type StoredBoard = {
   schemaVersion: number;
   revision: number;
+  generation: number;
   items: Pancake[];
   records: ExecutionRecord[];
   completionItems: CompletionItem[];
+  nextPancakeOrdinal: number;
+  undoHistory: UndoEntry[];
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -20,11 +23,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function validItem(value: unknown): value is StoredPancake {
   if (!isRecord(value)) return false;
-  return typeof value.id === "string"
-    && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.id)
+  return isPancakeId(value.id)
     && (value.plate === 1 || value.plate === 2)
-    && typeof value.x === "number" && Number.isFinite(value.x) && value.x >= OVAL_RX + 0.02 && value.x <= 1 - OVAL_RX - 0.02
-    && typeof value.y === "number" && Number.isFinite(value.y) && value.y >= OVAL_RY + 0.02 && value.y <= 1 - OVAL_RY - 0.02
+    && typeof value.x === "number" && Number.isFinite(value.x) && value.x >= LEGACY_OVAL_RX + 0.02 && value.x <= 1 - LEGACY_OVAL_RX - 0.02
+    && typeof value.y === "number" && Number.isFinite(value.y) && value.y >= LEGACY_OVAL_RY + 0.02 && value.y <= 1 - LEGACY_OVAL_RY - 0.02
     && typeof value.duration === "number" && Number.isSafeInteger(value.duration)
     && (value.temperature === undefined || (typeof value.temperature === "number" && Number.isSafeInteger(value.temperature)))
     && (value.startedAt === null || (typeof value.startedAt === "number" && Number.isFinite(value.startedAt) && value.startedAt >= 0))
@@ -32,7 +34,7 @@ function validItem(value: unknown): value is StoredPancake {
 }
 
 function decode(raw: string | null): StoredBoard {
-  if (raw === null) return { schemaVersion: LOCAL_BOARD_SCHEMA, revision: 0, items: [], records: [], completionItems: [] };
+  if (raw === null) return { schemaVersion: LOCAL_BOARD_SCHEMA, revision: 0, generation:INITIAL_BOARD_GENERATION, items: [], records: [], completionItems: [], nextPancakeOrdinal:1, undoHistory:[] };
 
   let value: unknown;
   try {
@@ -42,17 +44,25 @@ function decode(raw: string | null): StoredBoard {
   }
 
   const legacyItems = Array.isArray(value) ? value : null;
-  const schemaVersion = isRecord(value) ? value.schemaVersion : 1;
+  const rawSchemaVersion = isRecord(value) ? value.schemaVersion : 1;
+  const schemaVersion = typeof rawSchemaVersion === "number" ? rawSchemaVersion : Number.NaN;
   const revision = isRecord(value) ? value.revision : 0;
+  const rawGeneration = isRecord(value) ? value.generation : undefined;
   const rawItems = legacyItems ?? (isRecord(value) ? value.items : null);
-  const hasRecords = schemaVersion === 2 || schemaVersion === LOCAL_BOARD_SCHEMA;
+  const rawNextPancakeOrdinal = isRecord(value) ? value.nextPancakeOrdinal : undefined;
+  const hasRecords = schemaVersion >= 2 && schemaVersion <= LOCAL_BOARD_SCHEMA;
   const rawRecords = isRecord(value) && hasRecords ? value.records : [];
-  const rawCompletionItems = isRecord(value) && schemaVersion === LOCAL_BOARD_SCHEMA ? value.completionItems : [];
-  if ((!legacyItems && (!isRecord(value) || (schemaVersion !== 1 && schemaVersion !== 2 && schemaVersion !== LOCAL_BOARD_SCHEMA)))
+  const rawCompletionItems = isRecord(value) && schemaVersion >= 3 && schemaVersion <= LOCAL_BOARD_SCHEMA ? value.completionItems : [];
+  const rawUndoHistory = isRecord(value) && schemaVersion >= 5 && schemaVersion <= LOCAL_BOARD_SCHEMA ? value.undoHistory : undefined;
+  if ((!legacyItems && (!isRecord(value) || !Number.isSafeInteger(schemaVersion) || (schemaVersion as number) < 1 || (schemaVersion as number) > LOCAL_BOARD_SCHEMA))
     || !Number.isSafeInteger(revision) || (revision as number) < 0
+    || (schemaVersion === LOCAL_BOARD_SCHEMA && (!Number.isSafeInteger(rawGeneration) || (rawGeneration as number) < INITIAL_BOARD_GENERATION))
     || !Array.isArray(rawItems) || !rawItems.every(validItem)
     || (hasRecords && !Array.isArray(rawRecords))
-    || (schemaVersion === LOCAL_BOARD_SCHEMA && !Array.isArray(rawCompletionItems))) {
+    || (schemaVersion >= 3 && schemaVersion <= LOCAL_BOARD_SCHEMA && !Array.isArray(rawCompletionItems))
+    || (schemaVersion >= 4 && schemaVersion <= LOCAL_BOARD_SCHEMA && rawNextPancakeOrdinal !== undefined
+      && (!Number.isSafeInteger(rawNextPancakeOrdinal) || (rawNextPancakeOrdinal as number) < 1 || (rawNextPancakeOrdinal as number) > 193))
+    || (schemaVersion >= 5 && schemaVersion <= LOCAL_BOARD_SCHEMA && !Array.isArray(rawUndoHistory))) {
     throw new Error("保存データの形式が現在のアプリに対応していません。データを保護するため、操作を停止しました。");
   }
 
@@ -62,13 +72,18 @@ function decode(raw: string | null): StoredBoard {
     ids.add(item.id);
   }
 
-  const records = normalizeExecutionRecords(rawRecords);
+  const board = normalizeBoardData({
+    items:rawItems,
+    records:rawRecords,
+    completionItems:rawCompletionItems,
+    generation:schemaVersion === LOCAL_BOARD_SCHEMA ? rawGeneration : undefined,
+    nextPancakeOrdinal:schemaVersion >= 4 ? rawNextPancakeOrdinal : undefined,
+    undoHistory:rawUndoHistory,
+  });
   return {
     schemaVersion: LOCAL_BOARD_SCHEMA,
     revision: revision as number,
-    items: normalizePancakes(rawItems),
-    records,
-    completionItems: normalizeCompletionItems(rawCompletionItems, records),
+    ...board,
   };
 }
 
@@ -87,17 +102,22 @@ export function readLocalBoard(storage: BoardStorage = window.localStorage): Sna
       }
     }
   }
-  return { revision: stored.revision, items: stored.items, records:stored.records, completionItems:stored.completionItems, serverNow: Date.now() };
+  return { revision: stored.revision, generation:stored.generation, items: stored.items, records:stored.records, completionItems:stored.completionItems, nextPancakeOrdinal:stored.nextPancakeOrdinal, undoHistory:stored.undoHistory, serverNow: Date.now() };
 }
 
 export function writeLocalBoard(snapshot: Snapshot, storage: Pick<Storage, "setItem"> = window.localStorage): void {
-  const records = normalizeExecutionRecords(snapshot.records ?? []);
+  const board = normalizeBoardData({
+    items:snapshot.items,
+    records:snapshot.records ?? [],
+    completionItems:snapshot.completionItems ?? [],
+    generation:snapshot.generation,
+    nextPancakeOrdinal:snapshot.nextPancakeOrdinal,
+    undoHistory:snapshot.undoHistory ?? [],
+  });
   const stored: StoredBoard = {
     schemaVersion: LOCAL_BOARD_SCHEMA,
     revision: snapshot.revision,
-    items: normalizePancakes(snapshot.items),
-    records,
-    completionItems: normalizeCompletionItems(snapshot.completionItems ?? [], records),
+    ...board,
   };
   storage.setItem(LOCAL_BOARD_KEY, JSON.stringify(stored));
 }

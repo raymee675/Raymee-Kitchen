@@ -109,7 +109,7 @@ try {
   const legacyAccess=await requestAt(deviceIp,"/api/board",{headers:{Cookie:`teppan_device=${legacyToken}`}});
   assert.equal(legacyAccess.status,200,"existing device sessions remain valid after DB migration");
   const migratedBoard=JSON.parse(legacyAccess.text);
-  const migratedItem=migratedBoard.items.find(item=>item.id===existingItem.id);
+  const migratedItem=migratedBoard.items.find(item=>item.id==="1-1");
   assert.ok(migratedItem,"saved board state must survive schema migration");
   assert.equal(migratedBoard.revision,7,"board revision must survive item normalization");
   assert.equal(migratedItem.duration,90,"legacy timer duration is normalized to the fixed duration");
@@ -126,7 +126,7 @@ try {
   const command={operationId:randomUUID(),type:"create",id:createdId,plate:2,x:0.2,y:0.2};
   const changed=await requestAt(deviceIp,"/api/board",{method:"POST",headers:{Cookie:cookie,Origin:mobileOrigin,"Content-Type":"application/json"},body:JSON.stringify(command)});
   assert.equal(changed.status,200);
-  const createdItem=JSON.parse(changed.text).items.find(item=>item.id===createdId);
+  const createdItem=JSON.parse(changed.text).items.find(item=>item.id==="1-2");
   assert.ok(createdItem);
   assert.equal(createdItem.duration,90); assert.equal(createdItem.temperature,96);
 

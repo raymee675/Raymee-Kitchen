@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
-import { applySnapshotCommand, KitchenError, normalizeCompletionItems, normalizeExecutionRecords, normalizePancakes, parseCommand } from "../lib/kitchen-model.ts";
+import { applySnapshotCommand, KitchenError, normalizeBoardData, parseCommand } from "../lib/kitchen-model.ts";
 
 const defaultDatabasePath = fileURLToPath(new URL("../data-pc/kitchen.sqlite", import.meta.url));
 const file = resolve(process.env.KITCHEN_DB_PATH || defaultDatabasePath);
@@ -53,10 +53,14 @@ function readBoardState(serialized) {
   if (!legacy && (!decoded || typeof decoded !== "object" || Array.isArray(decoded) || !Array.isArray(decoded.items))) {
     throw new Error("Board state has an invalid format");
   }
-  const items = normalizePancakes(legacy ? decoded : decoded.items);
-  const records = normalizeExecutionRecords(legacy ? [] : decoded.records === undefined ? [] : decoded.records);
-  const completionItems = normalizeCompletionItems(legacy || decoded.completionItems === undefined ? [] : decoded.completionItems, records);
-  return {items, records, completionItems};
+  return normalizeBoardData({
+    items:legacy ? decoded : decoded.items,
+    records:legacy || decoded.records === undefined ? [] : decoded.records,
+    completionItems:legacy || decoded.completionItems === undefined ? [] : decoded.completionItems,
+    generation:legacy ? undefined : decoded.generation,
+    nextPancakeOrdinal:legacy ? undefined : decoded.nextPancakeOrdinal,
+    undoHistory:legacy || decoded.undoHistory === undefined ? undefined : decoded.undoHistory,
+  });
 }
 
 function migrateBoardState() {
@@ -100,7 +104,7 @@ export function executeCommand(input, actor) {
     database.prepare("INSERT INTO operations (id, actor, request_hash, applied_revision, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(command.operationId, actor, requestHash, revision, receivedAt);
     database.prepare("UPDATE boards SET state = ?, revision = ?, updated_at = ? WHERE id = 'main' AND revision = ?")
-      .run(JSON.stringify({items:nextBoard.items, records:nextBoard.records, completionItems:nextBoard.completionItems}), revision, receivedAt, row.revision);
+    .run(JSON.stringify({generation:nextBoard.generation, items:nextBoard.items, records:nextBoard.records, completionItems:nextBoard.completionItems, nextPancakeOrdinal:nextBoard.nextPancakeOrdinal, undoHistory:nextBoard.undoHistory}), revision, receivedAt, row.revision);
     const snapshot = readSnapshot();
     database.exec("COMMIT");
     return { ...snapshot, operationId: command.operationId, appliedRevision: revision };

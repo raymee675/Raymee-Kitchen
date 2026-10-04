@@ -71,15 +71,19 @@ export function useKitchen() {
   }, [currentTime,sync]);
   const send = useCallback(async (command:Command) => {
     if (!navigator.onLine || performance.now() - lastSuccess.current > 4000) throw new Error("接続が戻ってから操作してください。");
-    if (pending.current.has(command.id)) throw new Error("このお好み焼きは操作を送信中です。");
-    pending.current.add(command.id);
+    const currentState = state.current;
+    if (!currentState) throw new Error("最新の盤面を読み込んでから操作してください。");
+    const request = {...command, expectedGeneration:command.expectedGeneration ?? currentState.generation} as Command;
+    const pendingKey = request.type === "create" || request.type === "undo" || request.type === "reset" ? request.operationId : request.id;
+    if (pending.current.has(pendingKey)) throw new Error("このお好み焼きは操作を送信中です。");
+    pending.current.add(pendingKey);
     setPendingIds(new Set(pending.current));
     try {
       for (let attempt=0; attempt<2; attempt++) {
         const sent = performance.now();
         let response:Response;
         try {
-          response = await fetch("/api/board", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(command), signal:AbortSignal.timeout(4500)});
+          response = await fetch("/api/board", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(request), signal:AbortSignal.timeout(4500)});
         } catch {
           if (attempt === 0 && navigator.onLine) continue;
           setConnection("offline");
@@ -96,7 +100,7 @@ export function useKitchen() {
       }
       throw new Error("操作結果を確認できませんでした。");
     } catch(error) { toast.error(error instanceof Error ? error.message : "操作を保存できませんでした。"); throw error; }
-    finally { pending.current.delete(command.id); if(alive.current) setPendingIds(new Set(pending.current)); }
+    finally { pending.current.delete(pendingKey); if(alive.current) setPendingIds(new Set(pending.current)); }
   }, [accept,sync]);
   return {snapshot, now, connection, pendingIds, send, sync, currentTime, getSnapshot:() => state.current};
 }

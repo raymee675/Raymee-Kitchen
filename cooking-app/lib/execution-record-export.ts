@@ -1,4 +1,4 @@
-import { COMPLETION_EXPIRED_REASON, LEGACY_SERVICE_OUTCOME, PLATE_DISCARD_REASON, completionStatus, type ExecutionRecord } from "./kitchen-model";
+import { COMPLETION_EXPIRED_REASON, LEGACY_SERVICE_OUTCOME, PLATE_DISCARD_REASON, completionStatus, isPancakeId, type ExecutionRecord } from "./kitchen-model";
 
 const headers = [
   "お好み焼きID", "タイマー開始時刻", "回収時刻", "温度(℃)", "区間加熱秒数", "合計加熱秒数",
@@ -17,6 +17,13 @@ function seconds(milliseconds: number): string {
 
 function csvField(value: string | number): string {
   return `"${String(value).replaceAll('"', '""')}"`;
+}
+
+function excelTextId(value: string): string {
+  if (!isPancakeId(value)) throw new Error("実行記録のお好み焼きIDが正しくありません。");
+  // A fixed formula makes Excel keep values such as 1-1 as text. The ID
+  // allowlist prevents user-controlled formula content inside this wrapper.
+  return `="${value}"`;
 }
 
 export function executionRecordsToCsv(records: readonly ExecutionRecord[], now = Date.now()): string {
@@ -38,7 +45,7 @@ export function executionRecordsToCsv(records: readonly ExecutionRecord[], now =
         ? record.serveDeadlineAt
         : null);
     return record.segments.map(segment => [
-      record.id,
+      excelTextId(record.id),
       localTimestamp(record.startedAt),
       localTimestamp(record.collectedAt),
       segment.temperature === null ? "温度不明" : segment.temperature,

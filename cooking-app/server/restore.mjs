@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
-import { normalizeCompletionItems, normalizeExecutionRecords, normalizePancakes, OVAL_RX, OVAL_RY } from "../lib/kitchen-model.ts";
+import { isPancakeId, normalizeBoardData, LEGACY_OVAL_RX, LEGACY_OVAL_RY } from "../lib/kitchen-model.ts";
 
 const input = process.argv[2];
 if (!input) {
@@ -45,21 +45,21 @@ function validateBoardState(serialized) {
   const legacy = Array.isArray(state);
   if (!legacy && (!state || typeof state !== "object" || Array.isArray(state)
     || !Array.isArray(state.items) || !Array.isArray(state.records)
-    || (state.completionItems !== undefined && !Array.isArray(state.completionItems)))) {
+    || (state.completionItems !== undefined && !Array.isArray(state.completionItems))
+    || (state.undoHistory !== undefined && !Array.isArray(state.undoHistory)))) {
     throw new Error("鉄板ボードのデータが見つからないか、形式が正しくありません。");
   }
   const items = legacy ? state : state.items;
   const records = legacy ? [] : state.records;
   const completionItems = legacy || state.completionItems === undefined ? [] : state.completionItems;
   const ids = new Set();
-  const uuidV4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
   for (const item of items) {
     if (!item || typeof item !== "object" || Array.isArray(item)
-      || typeof item.id !== "string" || !uuidV4.test(item.id)
+      || !isPancakeId(item.id)
       || (item.plate !== 1 && item.plate !== 2)
-      || typeof item.x !== "number" || !Number.isFinite(item.x) || item.x < OVAL_RX + 0.02 || item.x > 1 - OVAL_RX - 0.02
-      || typeof item.y !== "number" || !Number.isFinite(item.y) || item.y < OVAL_RY + 0.02 || item.y > 1 - OVAL_RY - 0.02
+      || typeof item.x !== "number" || !Number.isFinite(item.x) || item.x < LEGACY_OVAL_RX + 0.02 || item.x > 1 - LEGACY_OVAL_RX - 0.02
+      || typeof item.y !== "number" || !Number.isFinite(item.y) || item.y < LEGACY_OVAL_RY + 0.02 || item.y > 1 - LEGACY_OVAL_RY - 0.02
       || typeof item.duration !== "number" || !Number.isSafeInteger(item.duration)
       || (item.temperature !== undefined && (typeof item.temperature !== "number" || !Number.isSafeInteger(item.temperature)))
       || !(item.startedAt === null || (typeof item.startedAt === "number" && Number.isFinite(item.startedAt) && item.startedAt >= 0))
@@ -71,20 +71,15 @@ function validateBoardState(serialized) {
   }
 
   try {
-    // These normalizers validate interval structure without changing the
-    // serialized state that SQLite's backup API copies to the restore file.
-    normalizePancakes(items);
-    const normalizedRecords = normalizeExecutionRecords(records);
-    const normalizedCompletionItems = normalizeCompletionItems(completionItems, normalizedRecords);
-    if (normalizedRecords.some(record => !uuidV4.test(record.id))) {
-      throw new Error("実行記録のお好み焼きIDが正しくありません。");
-    }
-    if (items.some(item => normalizedRecords.some(record => record.id === item.id))) {
-      throw new Error("鉄板ボードと実行記録でお好み焼きIDが重複しています。");
-    }
-    if (normalizedCompletionItems.some(item => items.some(active => active.id === item.id))) {
-      throw new Error("完成ボックスと鉄板ボードでお好み焼きIDが重複しています。");
-    }
+    // Validate both legacy and current envelopes without mutating the backup.
+    normalizeBoardData({
+      items,
+      records,
+      completionItems,
+      generation:legacy ? undefined : state.generation,
+      nextPancakeOrdinal:legacy ? undefined : state.nextPancakeOrdinal,
+      undoHistory:legacy ? undefined : state.undoHistory,
+    });
   } catch {
     throw new Error("鉄板ボードまたは実行記録のデータが正しくありません。");
   }

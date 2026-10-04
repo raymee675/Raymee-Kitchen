@@ -1,16 +1,16 @@
 "use client";
 import { useEffect, useRef, useState, type PointerEvent, type KeyboardEvent } from "react";
-import { Flame, CircleHelp, Plus, ArrowLeft, ArrowRight, LoaderCircle, Download } from "lucide-react";
+import { Flame, CircleHelp, Plus, ArrowLeft, ArrowRight, LoaderCircle, Download, Undo2, RotateCcw } from "lucide-react";
 import { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
 import { useKitchen } from "@/lib/use-kitchen";
 import { useKitchenLocal } from "@/lib/use-kitchen-local";
-import { OVAL_RX, OVAL_RY, PLATE_DISCARD_REASON, clampPosition, completionStatus, completionTimer, overlaps, timer, parseCommand, type Pancake, type Command, type Snapshot } from "@/lib/kitchen-model";
+import { GRID_CELLS, GRID_COLUMNS, GRID_ROWS, OVAL_RX, OVAL_RY, completionStatus, completionTimer, gridCellAt, gridDropBlockReason, isGridCellOccupied, isGridOverCapacity, nearestGridCell, timer, parseCommand, type Pancake, type Command, type Snapshot } from "@/lib/kitchen-model";
 import { downloadExecutionRecords } from "@/lib/execution-record-export";
 import { createUuid } from "@/lib/uuid";
 
-type DropTarget = { plate:1|2; x:number; y:number; valid:boolean };
+type DropTarget = { plate:1|2; x:number; y:number; cellIndex:number; valid:boolean; reason:"occupied"|"over_capacity"|null };
 type Contact = { pointerId:number; x:number; y:number; max:number; item:Pancake|null; action:"left"|"right"|null; plate:1|2; targetX:number; targetY:number; grabOffsetX:number; grabOffsetY:number; longPressTimer:number|null; dragging:boolean; drop:DropTarget|null };
 type ModelContext = { registerTool:(tool:Record<string,unknown>, options:{signal:AbortSignal}) => unknown };
 type KitchenController = {
@@ -70,16 +70,18 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  const kitchen = useController();
  const {snapshot, now, connection, pendingIds, send, sync} = kitchen;
  const [help,setHelp] = useState(false);
+ const [resetConfirmation,setResetConfirmation] = useState(false);
+ const resetSubmitting=useRef(false);
  const contact = useRef<Contact|null>(null);
  const [pressed,setPressed] = useState<string|null>(null);
  const [dragPreview,setDragPreview] = useState<(DropTarget & {id:string})|null>(null);
- const [deleteCue,setDeleteCue] = useState(false);
  const plateSurfaces = useRef<Partial<Record<1|2,HTMLDivElement|null>>>({});
  const plateSvgs = useRef<Partial<Record<1|2,SVGSVGElement|null>>>({});
  const actions = useRef(kitchen);
  useEffect(()=>{actions.current=kitchen;},[kitchen]);
  const available = connection === "online";
  const items = snapshot?.items ?? [];
+ const gridBlocked = isGridOverCapacity(items);
  const completionItems = snapshot?.completionItems ?? [];
  const counts = {blank:0,running:0,done:0};
  items.forEach(item=>counts[timer(item,now).state]++);
@@ -103,10 +105,10 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      await actions.current.sync();
      return actions.current.getSnapshot();
    }});
-   register({name:"operate_kitchen",title:"お好み焼きを操作",description:"楕円の追加(create)、固定90秒計測の開始(start)、温度を1℃変更(adjust)、鉄板間の移動(move)、焼き上がり楕円の完成ボックス移動(remove)、完成ボックス項目の提供/提供不可確定(remove)、状態を問わない盤外削除(delete)を実行します。赤くなる前の盤外削除は記録せず、赤くなった後の盤外削除は即時提供不可として記録します。画面と同じ共有データを変更します。operationIdと新規idはUUID v4、既存項目の操作には取得したversionをexpectedVersionで指定します。",inputSchema:{type:"object",properties:{operationId:{type:"string"},type:{enum:["create","start","adjust","move","remove","delete"]},id:{type:"string"},plate:{enum:[1,2]},x:{type:"number",minimum:0,maximum:1},y:{type:"number",minimum:0,maximum:1},expectedVersion:{type:"integer",minimum:1},delta:{enum:[-1,1]}},required:["operationId","type","id"],additionalProperties:false},annotations:{readOnlyHint:false},execute:async(input:unknown)=>{
+   register({name:"operate_kitchen",title:"お好み焼きを操作",description:"楕円の追加(create)、固定90秒計測の開始(start)、温度を1℃変更(adjust)、鉄板間の移動(move)、焼き上がり楕円の完成ボックス移動(remove)、完成ボックス項目の提供/提供不可確定(remove)、直近の配置・移動の取り消し(undo)を実行します。取り消しは直近50件までで、タイマー開始・温度変更・完成ボックス移動・提供操作を行うと、それ以前の取り消し履歴は消えます。画面と同じ共有データを変更します。operationIdはUUID v4です。undoではread_kitchenのundoHistory末尾にあるoperationIdをexpectedUndoOperationIdへ指定します。createではidを指定せず、配置順に採番します。他の操作には対象のidと取得したversionをexpectedVersionで指定します。",inputSchema:{type:"object",properties:{operationId:{type:"string"},type:{enum:["create","start","adjust","move","remove","undo"]},id:{type:"string"},plate:{enum:[1,2]},x:{type:"number",minimum:0,maximum:1},y:{type:"number",minimum:0,maximum:1},expectedVersion:{type:"integer",minimum:1},expectedUndoOperationId:{type:"string"},delta:{enum:[-1,1]}},required:["operationId","type"],additionalProperties:false},annotations:{readOnlyHint:false},execute:async(input:unknown)=>{
      const command = parseCommand(input);
      const result = await actions.current.send(command);
-     return {revision:result.revision,items:result.items,completionItems:result.completionItems,records:result.records};
+     return {revision:result.revision,items:result.items,completionItems:result.completionItems,records:result.records,undoHistory:result.undoHistory};
    }});
    return ()=>lifecycle.abort();
  },[]);
@@ -114,21 +116,26 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  const run = (command:Command) => { void send(command).then(result=>{
    if(command.type==="adjust") { const item=result.items.find(i=>i.id===command.id); if(item) toast.success(`温度を${item.temperature}℃に変更しました。`,{duration:1800}); }
    else if(command.type==="move") { const item=result.items.find(i=>i.id===command.id); if(item) toast.success(`鉄板${item.plate}へ移動しました。`,{duration:1800}); }
-   else if(command.type==="delete") {
-     const record=result.records.find(item=>item.id===command.id);
-     toast.success(record?.unavailableReason===PLATE_DISCARD_REASON?"盤外破棄として提供不可を記録しました。":"楕円を削除しました。",{duration:2200});
-   }
    else if(command.type==="remove") {
      const record=result.records.find(item=>item.id===command.id);
      if(result.completionItems.some(item=>item.id===command.id)) toast.success("完成ボックスに移しました。",{duration:1800});
      else if(record?.servedAt!==null&&record?.servedAt!==undefined) toast.success("提供済みにしました。",{duration:1800});
      else if(record?.unavailableAt!==null&&record?.unavailableAt!==undefined) toast.success("提供不可として記録しました。",{duration:1800});
    }
+   else if(command.type==="undo") toast.success("直前の操作を取り消しました。",{duration:1800});
  }).catch(()=>{}); };
  function exportRecords() {
    if (!records.length) return;
    downloadExecutionRecords(records, kitchen.currentTime());
    toast.success(`${records.length}件の実行記録を書き出しました。`, {duration:2200});
+ }
+ function confirmReset() {
+   if(!snapshot||!available||pendingIds.size>0||resetSubmitting.current)return;
+   resetSubmitting.current=true;
+   void send({operationId:createUuid(),type:"reset",expectedGeneration:snapshot.generation}).then(()=>{
+     setResetConfirmation(false);
+     toast.success("調理データを初期化しました。次のIDは1-1です。",{duration:2400});
+   }).catch(()=>{}).finally(()=>{resetSubmitting.current=false;});
  }
  function perform(item:Pancake, action:string) {
    const current = timer(item,kitchen.currentTime());
@@ -142,15 +149,14 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  }
  function dropTargetAt(clientX:number,clientY:number,id:string,offsetX=0,offsetY=0):DropTarget|null {
    for(const plate of [1,2] as const) {
-     const surface=plateSurfaces.current[plate],svg=plateSvgs.current[plate];
-     if(!surface||!svg) continue;
-     const surfaceBounds=surface.getBoundingClientRect();
-     if(clientX<surfaceBounds.left||clientX>surfaceBounds.right||clientY<surfaceBounds.top||clientY>surfaceBounds.bottom) continue;
+     const svg=plateSvgs.current[plate];
+     if(!svg) continue;
      const svgBounds=svg.getBoundingClientRect();
+     if(clientX<svgBounds.left||clientX>svgBounds.right||clientY<svgBounds.top||clientY>svgBounds.bottom) continue;
      if(!svgBounds.width||!svgBounds.height) return null;
-     const position=clampPosition((clientX-svgBounds.left)/svgBounds.width+offsetX,(clientY-svgBounds.top)/svgBounds.height+offsetY);
-     const valid=!items.some(other=>other.id!==id&&other.plate===plate&&overlaps(other,position));
-     return {plate,...position,valid};
+     const position=nearestGridCell((clientX-svgBounds.left)/svgBounds.width+offsetX,(clientY-svgBounds.top)/svgBounds.height+offsetY);
+     const reason=gridDropBlockReason(items,plate,position.index,id);
+     return {plate,x:position.x,y:position.y,cellIndex:position.index,valid:reason===null,reason};
    }
    return null;
  }
@@ -170,8 +176,8 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      if(contact.current!==current||current.max>=12||!current.item) return;
      current.longPressTimer=null;
      current.dragging=true;
-     current.drop={plate:current.item.plate,x:current.item.x,y:current.item.y,valid:true};
-     setDeleteCue(false);
+     const cell=nearestGridCell(current.item.x,current.item.y);
+     current.drop={plate:current.item.plate,x:cell.x,y:cell.y,cellIndex:cell.index,valid:true,reason:null};
      setDragPreview({id:current.item.id,...current.drop});
    },450);
    event.currentTarget.setPointerCapture(event.pointerId);
@@ -184,38 +190,41 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    const target=c.item?dropTargetAt(event.clientX,event.clientY,c.item.id,c.grabOffsetX,c.grabOffsetY):null;
    if(target&&c.item) {
      c.drop=target;
-     setDeleteCue(false);
      setDragPreview({id:c.item.id,...target});
    } else {
      setDragPreview(null);
-     setDeleteCue(true);
    }
  }
  function up(event:PointerEvent<SVGSVGElement>) {
    const c=contact.current;
    if (!c || c.pointerId!==event.pointerId) return;
    clearLongPressTimer(c);
-   contact.current=null; setPressed(null); setDragPreview(null); setDeleteCue(false);
+   contact.current=null; setPressed(null); setDragPreview(null);
    if(event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
    if(!available) return;
    if(c.dragging&&c.item) {
      const target=dropTargetAt(event.clientX,event.clientY,c.item.id,c.grabOffsetX,c.grabOffsetY);
+     if(!target) return;
+     if(!target.valid) { toast.error(target.reason==="over_capacity"?"6枚を超えている鉄板には移動できません。空きのある別の鉄板へ移動してください。":"このマスは使用中のため移動できません。"); return; }
+     if(target.plate===c.item.plate&&Math.abs(target.x-c.item.x)<0.000001&&Math.abs(target.y-c.item.y)<0.000001) return;
      const base={operationId:createUuid(),id:c.item.id,expectedVersion:c.item.version};
-     if(!target) run({...base,type:"delete"});
-     else if(!target.valid) toast.error("他の楕円と重なる位置には移動できません。");
-     else if(target.plate===c.item.plate&&Math.abs(target.x-c.item.x)<0.000001&&Math.abs(target.y-c.item.y)<0.000001) return;
-     else run({...base,type:"move",plate:target.plate,x:target.x,y:target.y});
+     run({...base,type:"move",plate:target.plate,x:target.x,y:target.y});
      return;
    }
    if(Math.max(c.max,Math.hypot(event.clientX-c.x,event.clientY-c.y))>=12) return;
    if(c.item) perform(c.item,c.action??"tap");
-   else run({operationId:createUuid(),id:createUuid(),type:"create",plate:c.plate,x:c.targetX,y:c.targetY});
+   else {
+     if(gridBlocked) { toast.error("各鉄板が6枚以下になるまで配置できません。"); return; }
+     const cell=gridCellAt(c.targetX,c.targetY);
+     if(isGridCellOccupied(items,c.plate,cell.index)) { toast.error("このマスにはすでに楕円があります。空いているマスをタップしてください。"); return; }
+     run({operationId:createUuid(),type:"create",plate:c.plate,x:cell.x,y:cell.y});
+   }
  }
  function cancel(event:PointerEvent<SVGSVGElement>) {
    const c=contact.current;
    if(!c||c.pointerId!==event.pointerId) return;
    clearLongPressTimer(c);
-   contact.current=null; setPressed(null); setDragPreview(null); setDeleteCue(false);
+   contact.current=null; setPressed(null); setDragPreview(null);
  }
  function keyboard(event:KeyboardEvent<SVGElement>,item:Pancake,controlAction?:"left"|"right") {
    if(!available||pendingIds.has(item.id))return;
@@ -224,18 +233,23 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      : ({"Enter":"tap"," ":"tap","ArrowLeft":"left","ArrowRight":"right","ArrowUp":"up","Delete":"up"} as Record<string,string>)[event.key];
    if(action){event.preventDefault();perform(item,action);}
  }
-  const connectionLabel = __PAGES_MODE__
+ const connectionLabel = __PAGES_MODE__
     ? (connection==="online"?"この端末に保存":connection==="connecting"?"準備中":"操作停止中")
     : {connecting:"接続中",online:"同期中",offline:"未接続",unauthorized:"要端末登録"}[connection];
+ const latestUndo=snapshot?.undoHistory.at(-1);
  return <main className="kitchen">
  <Toaster position="top-center" richColors theme="light"/>
- {deleteCue&&<div role="status" style={{position:"fixed",left:"50%",bottom:"max(16px, env(safe-area-inset-bottom))",transform:"translateX(-50%)",zIndex:1000,padding:"10px 16px",border:"1px solid #fff",borderRadius:999,background:"#a83424",color:"#fff",boxShadow:"0 4px 16px #0004",fontSize:14,fontWeight:700,whiteSpace:"nowrap",pointerEvents:"none"}}>鉄板の外です。離すと削除</div>}
  <header className="topbar"><div className="brand"><span className="brand-icon"><Flame size={23}/></span><div><h1>鉄板タイマー</h1><p>TEPPAN TIMER</p></div></div><div className="top-actions"><span className={`connection ${connection}`} role="status">{connectionLabel}</span>
  {__PAGES_MODE__&&counts.running>0&&<span className={`wake-indicator ${wakeLock}`} role="status">{wakeLock==="active"?"画面を点灯中":"端末設定で消灯を延長"}</span>}
  {__PAGES_MODE__&&kitchen.updateReady&&<button className="update-button" disabled={counts.running>0} onClick={()=>kitchen.applyUpdate?.()}>{counts.running>0?"調理後に更新":"更新を適用"}</button>}
  <button className="update-button export-button" aria-label="実行記録をExcel用CSVに書き出す" title="実行記録をExcel用CSVに書き出す" disabled={!snapshot||records.length===0} onClick={exportRecords}><Download size={15}/><span>記録を書き出す</span></button>
+ <button className="update-button export-button undo-button" aria-label="直前の操作を取り消す" title={latestUndo?"直前の操作を取り消す":"取り消せる操作はありません"} disabled={!available||pendingIds.size>0||!latestUndo} onClick={()=>{if(latestUndo)run({operationId:createUuid(),type:"undo",expectedUndoOperationId:latestUndo.operationId});}}><Undo2 size={15}/><span>操作を取り消す</span></button>
+ {!resetConfirmation
+   ? <button className="update-button export-button reset-button" disabled={!snapshot||!available||pendingIds.size>0} onClick={()=>setResetConfirmation(true)}><RotateCcw size={15}/><span>リセット</span></button>
+   : <div className="reset-confirmation" role="alert"><span>鉄板・完成ボックス・実行記録・取り消し履歴を消去し、IDを1-1から再開します。{__PAGES_MODE__?"このブラウザーの調理データ":"全端末で共有する調理データ"}が対象です。記録を残す場合は先に書き出してください。</span><button className="update-button reset-confirm" disabled={!available||pendingIds.size>0||resetSubmitting.current} onClick={confirmReset}>初期化を確定</button><button className="reset-cancel" disabled={pendingIds.size>0||resetSubmitting.current} onClick={()=>{if(!resetSubmitting.current)setResetConfirmation(false);}}>キャンセル</button></div>}
  <Dialog open={help} onOpenChange={setHelp}><DialogTrigger asChild><button className="icon-button" aria-label="使い方"><CircleHelp size={21}/></button></DialogTrigger><DialogContent className="help-dialog"><DialogHeader><DialogTitle>鉄板タイマーの使い方</DialogTitle><DialogDescription>{__PAGES_MODE__?"調理状態は、このスマホのブラウザー内だけに保存されます。":"同じ画面を開いたスマホで、調理の状態を共有できます。"}</DialogDescription></DialogHeader>
- <ol className="help-list"><li>鉄板の空いている場所をタップすると、白い楕円が置かれます。</li><li>白い楕円をタップすると、90秒で計測が始まります。</li><li>楕円の左右にある矢印をタップして、待機中・計測中の温度を1℃ずつ変更できます。初期温度は96℃です。</li><li>楕円本体を長押しすると、2枚の鉄板の間で移動できます。鉄板の外で離すと削除されます。</li><li>計測時間は常に90秒です。上から白くなり、0秒で全体が赤くなります。赤い楕円をタップすると、完成ボックスへ移って30分タイマーが始まります。</li><li>完成ボックスを期限前にタップすると提供済みになります。期限を過ぎると青い楕円の「提供不可」に変わり、タップすると履歴に残してボックスから除きます。</li><li>赤い楕円を鉄板の外へドラッグすると、完成ボックスを通さず即時「提供不可（盤外破棄）」として記録されます。</li></ol>
+ <ol className="help-list"><li>鉄板は縦2行・横3列の6マスです。空きマスをタップすると、その中央に白い楕円が置かれます。</li><li>白い楕円をタップすると、90秒で計測が始まります。</li><li>楕円の左右にある矢印をタップして、待機中・計測中の温度を1℃ずつ変更できます。初期温度は96℃です。</li><li>楕円本体を長押しすると、空いているマスへ移動できます。鉄板の外または鉄板の間の隙間で離すと、元の場所に戻ります。</li><li>計測時間は常に90秒です。上から白くなり、0秒で全体が赤くなります。赤い楕円をタップすると、完成ボックスへ移って30分タイマーが始まります。</li><li>完成ボックスを期限前にタップすると提供済みになります。期限を過ぎると青い楕円の「提供不可」に変わり、タップすると履歴に残してボックスから除きます。</li></ol>
+ <p className="help-note">「操作を取り消す」では直近50件までの楕円配置・鉄板上の移動を操作順に戻せます。タイマー開始、温度変更、完成ボックスへの移動、提供・提供不可の確定を行うと、それ以前の取り消し履歴は消えます。旧データで1枚の鉄板が6枚を超えている間、新規配置と超過している鉄板への移動は停止します。空きのある別の鉄板へ移すか、焼き上がり後に完成ボックスへ移してください。</p>
  <p className="help-note">温度を変更してもタイマーは90秒のままです。調理中は画面を表示してご利用ください。{__PAGES_MODE__?"画面ロック中の通知はありません。":"未接続の間は表示のみとなります。"}</p>
  <p className="help-note">パソコン：Tabで楕円を選択、Enterで開始/取り出し、左右キーで温度を1℃調整。完成ボックスもTabで選択してEnterで操作できます。</p>
  <p className="help-note">記録は「記録を書き出す」からExcelで開けるCSVにできます。温度ごとの加熱秒数に加え、焼き上がり・保管・提供の時刻と最終ステータスを出力します。</p>
@@ -244,6 +258,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  </div></header>
  <div className="overview"><p>調理状況</p><div className="totals"><span>待機 <b>{counts.blank}</b></span><span>調理中 <b>{counts.running}</b></span><span>焼き上がり <b className={counts.done?"finished-count":""}>{counts.done}</b></span><span>完成ボックス <b>{completionItems.length}</b></span></div></div>
  {__PAGES_MODE__&&kitchen.statusMessage&&<div className="status-banner" role="alert">{kitchen.statusMessage}</div>}
+ {gridBlocked&&<div className="grid-capacity-warning" role="status">既存の配置数が6マスを超えている鉄板があります。楕円は元の位置のまま保持しています。新規配置とこの鉄板への移動はできません。楕円を長押しし、空いている別の鉄板へ移すか、焼き上がった楕円を完成ボックスへ移してください。両方の鉄板が6枚以下になると、残りを自動でマスへ整理します。</div>}
  {__PAGES_MODE__&&kitchen.cacheState==="preparing"&&<div className="status-banner" role="status">オフライン起動用の画面を準備しています。準備が終わるまでインターネット接続を保ってください。</div>}
  {__PAGES_MODE__&&kitchen.cacheState==="unavailable"&&<div className="status-banner" role="status">オフラインで再起動するための保存に失敗しました。アプリを再読み込みして準備状態を確認してください。</div>}
  {!__PAGES_MODE__&&connection==="unauthorized" && <div className="status-banner">この端末は未登録か、利用期限が切れています。<a href="/register">登録画面を開いてください</a> 管理者から登録コードを受け取ってください。</div>}
@@ -262,8 +277,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
        const label=unavailable?"提供不可":`${minutes}:${seconds} 残り`;
        const deadline=localClockLabel(record.serveDeadlineAt);
        return <button key={boxItem.id} type="button" role="listitem" title={`お好み焼きID: ${boxItem.id}`} className={`completion-card ${unavailable?"unavailable":""} ${pendingIds.has(boxItem.id)?"pending":""}`} disabled={!available||pendingIds.has(boxItem.id)} aria-label={`お好み焼きID ${boxItem.id}、${label}。タップして${unavailable?"提供不可として取り出す":"提供済みにする"}`} onClick={()=>run({operationId:createUuid(),type:"remove",id:boxItem.id,expectedVersion:boxItem.version})}>
-         <span className="completion-card-id">{boxItem.id.slice(0,18)}</span>
-         <span className="completion-card-id">{boxItem.id.slice(18)}</span>
+         <span className="completion-card-id">{boxItem.id}</span>
          <strong>{label}</strong>
          <small>{unavailable?"期限切れ":`期限 ${deadline}`}</small>
        </button>;
@@ -276,9 +290,14 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    const renderItems=[...plateItems];
    const draggedItem=dragPreview?items.find(i=>i.id===dragPreview.id):undefined;
    if(draggedItem&&dragPreview?.plate===plate&&draggedItem.plate!==plate) renderItems.push(draggedItem);
-   return <article className="plate-card" key={plate}><header className="plate-heading"><h2><span>0{plate}</span>鉄板 {plate}</h2><span>{plateItems.length} 枚</span></header><div className={`plate ${!available?"disabled":""}`} ref={element=>{plateSurfaces.current[plate]=element;}}>
-   <svg ref={element=>{plateSvgs.current[plate]=element;}} viewBox="0 0 1600 900" role="group" aria-label={`鉄板${plate}。空いている場所をタップして追加、楕円本体を長押しして移動`} onPointerDown={e=>down(e,plate)} onPointerMove={move} onPointerUp={up} onPointerCancel={cancel} onLostPointerCapture={cancel} onContextMenu={e=>e.preventDefault()}>
+   return <article className="plate-card" key={plate}><header className="plate-heading"><h2><span>0{plate}</span>鉄板 {plate}</h2><span className={plateItems.length>GRID_CELLS.length?"plate-count-overflow":""}>{plateItems.length} / {GRID_CELLS.length} マス</span></header><div className={`plate ${!available?"disabled":""}`} ref={element=>{plateSurfaces.current[plate]=element;}}>
+   <svg ref={element=>{plateSvgs.current[plate]=element;}} viewBox="0 0 1600 900" role="group" aria-label={`鉄板${plate}。3列2行の6マスです。空きマスをタップして配置し、楕円本体を長押しして別の空きマスへ移動`} onPointerDown={e=>down(e,plate)} onPointerMove={move} onPointerUp={up} onPointerCancel={cancel} onLostPointerCapture={cancel} onContextMenu={e=>e.preventDefault()}>
    <rect width="1600" height="900" fill="transparent"/>
+   <g className="plate-grid" pointerEvents="none" aria-hidden="true">
+     {Array.from({length:GRID_COLUMNS-1},(_,index)=><line key={`column-${index}`} x1={(index+1)*1600/GRID_COLUMNS} y1="0" x2={(index+1)*1600/GRID_COLUMNS} y2="900"/>)}
+     {Array.from({length:GRID_ROWS-1},(_,index)=><line key={`row-${index}`} x1="0" y1={(index+1)*900/GRID_ROWS} x2="1600" y2={(index+1)*900/GRID_ROWS}/>)}
+     {GRID_CELLS.map(cell=><circle key={cell.index} cx={cell.x*1600} cy={cell.y*900} r="9" className={isGridCellOccupied(items,plate,cell.index)?"plate-grid-center occupied":"plate-grid-center"}/>)}
+   </g>
    {renderItems.map(item=>{
      if(dragPreview?.id===item.id&&dragPreview.plate!==plate) return null;
      const preview=dragPreview?.id===item.id&&dragPreview.plate===plate?dragPreview:null;
@@ -291,8 +310,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
        <ellipse role="button" tabIndex={0} aria-disabled={!available||busy} aria-label={`お好み焼きID ${item.id}、${t.state==="blank"?`待機中、温度${item.temperature}度、タップで90秒の計測を開始`:t.state==="done"?`焼き上がり、温度${item.temperature}度、タップで完成ボックスに移動`:`残り${t.remaining}秒、温度${item.temperature}度`}`} cx={cx} cy={cy} rx={rx} ry={ry} fill={t.state==="done"?"#e13b3b":t.state==="blank"?"#fff":"#0c0d0f"} stroke={preview&&!preview.valid?"#fa3535":pressed===item.id?"#ffb276":"#92989f"} strokeWidth={preview?10:pressed===item.id?9:4} onKeyDown={e=>keyboard(e,item)}/>
        {t.state==="running"&&<rect x={cx-rx} y={cy-ry} width={rx*2} height={ry*2*t.progress} fill="#fff" clipPath={`url(#clip-${item.id})`} pointerEvents="none"/>}
        <text x={cx} y={cy-49} textAnchor="middle" className="oval-temperature" fontSize="26" fill={t.state==="blank"?"#636d77":t.state==="done"?"#fff":t.progress>0.52?"#353b41":"#ffffff"} pointerEvents="none">{item.temperature}℃</text>
-       <text x={cx} y={cy-29} textAnchor="middle" className="oval-id" fontSize="15" fill={t.state==="blank"?"#636d77":t.state==="done"?"#fff":t.progress>0.52?"#353b41":"#ffffff"} pointerEvents="none">{item.id.slice(0,18)}</text>
-       <text x={cx} y={cy-14} textAnchor="middle" className="oval-id" fontSize="15" fill={t.state==="blank"?"#636d77":t.state==="done"?"#fff":t.progress>0.52?"#353b41":"#ffffff"} pointerEvents="none">{item.id.slice(18)}</text>
+       <text x={cx} y={cy-29} textAnchor="middle" className="oval-id" fontSize="15" fill={t.state==="blank"?"#636d77":t.state==="done"?"#fff":t.progress>0.52?"#353b41":"#ffffff"} pointerEvents="none">{item.id}</text>
        {t.state!=="blank"&&<text x={cx} y={cy+49} textAnchor="middle" className="oval-number" fontSize="66" fill={t.state==="done"?"#fff":t.progress>0.79?"#16191e":"#fff"} pointerEvents="none">{t.remaining}</text>}
        {t.state!=="done"&&<>
          <g role="button" tabIndex={0} aria-label="温度を1℃下げる" aria-disabled={!available||busy} data-item-action="left" className="oval-arrow" onKeyDown={e=>keyboard(e,item,"left")}>
@@ -310,7 +328,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      </g>;
    })}
    </svg>
-   {!renderItems.length&&<div className="empty-plate">{snapshot?<Plus size={30} strokeWidth={1}/>:<LoaderCircle className="animate-spin" size={25}/>}<span>{snapshot?"タップして置く":__PAGES_MODE__?"保存データを読み込み中":"共有データを読み込み中"}</span></div>}
+   {!renderItems.length&&<div className="empty-plate">{snapshot?<Plus size={30} strokeWidth={1}/>:<LoaderCircle className="animate-spin" size={25}/>}<span>{snapshot?"空きマスをタップして配置":__PAGES_MODE__?"保存データを読み込み中":"共有データを読み込み中"}</span></div>}
    </div></article>;
  })}</section>
  <footer className="guide"><div><span className="guide-mark">1</span><span>空白をタップ<b>90秒計測スタート</b></span></div><div><span className="guide-arrows"><ArrowLeft size={19}/><ArrowRight size={19}/></span><span>左右の矢印をタップ<b>温度を1℃調整</b></span></div><div><span className="guide-red-dot" aria-hidden="true"/><span>赤い楕円をタップ<b>完成ボックスへ</b></span></div><div><span className="guide-mark">30</span><span>完成ボックスをタップ<b>提供/提供不可</b></span></div></footer>

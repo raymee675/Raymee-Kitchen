@@ -148,11 +148,12 @@ export function useKitchenLocal() {
   }, [serviceWorkerSupported]);
 
   const send = useCallback((input: Command): Promise<Snapshot> => {
-    const command = parseCommand(input);
     if (!activeEditor.current || !state.current) throw new Error("保存画面の準備ができていません。画面を開き直してください。");
-    if (pending.current.has(command.id)) throw new Error("このお好み焼きは操作中です。");
+    const command = parseCommand({...input, expectedGeneration:input.expectedGeneration ?? state.current.generation});
+    const pendingKey = command.type === "create" || command.type === "undo" || command.type === "reset" ? command.operationId : command.id;
+    if (pending.current.has(pendingKey)) throw new Error("このお好み焼きは操作中です。");
 
-    pending.current.add(command.id);
+    pending.current.add(pendingKey);
     setPendingIds(new Set(pending.current));
     const operation = mutationQueue.current.then(() => {
       if (!activeEditor.current) throw new Error("操作を保存できません。アプリを開き直してください。");
@@ -161,9 +162,12 @@ export function useKitchenLocal() {
       const applied = applySnapshotCommand(current, command, now);
       const next: Snapshot = {
         revision: current.revision + 1,
+        generation:applied.generation,
         items: applied.items,
         records: applied.records,
         completionItems: applied.completionItems,
+        nextPancakeOrdinal: applied.nextPancakeOrdinal,
+        undoHistory: applied.undoHistory,
         serverNow: now,
       };
       writeLocalBoard(next);
@@ -192,7 +196,7 @@ export function useKitchenLocal() {
       toast.error(message);
       throw error;
     }).finally(() => {
-      pending.current.delete(command.id);
+      pending.current.delete(pendingKey);
       if (alive.current) setPendingIds(new Set(pending.current));
     });
   }, [publish]);
