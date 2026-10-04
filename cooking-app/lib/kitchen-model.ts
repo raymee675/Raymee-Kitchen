@@ -738,7 +738,25 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
         || completionItems.some(item => item.id === latest.id)) {
         throw new KitchenError("undo_conflict", "配置した楕円の状態が更新されています。最新の状態を確認してください。");
       }
-      return normalizeChangedBoard({...base, items:canonicalItems.filter(item => item.id !== latest.id), undoHistory:remainingHistory});
+      if (board.generation >= Number.MAX_SAFE_INTEGER) {
+        throw new KitchenError("invalid_state", "盤面世代が上限に達したため、配置を取り消せません。");
+      }
+      const remainingItems = canonicalItems.filter(item => item.id !== latest.id);
+      const remainingRecords = records.filter(record => record.id !== latest.id);
+      const remainingCompletionItems = completionItems.filter(item => item.id !== latest.id);
+      const ordinal = pancakeOrdinalForId(latest.id);
+      const canReuseId = ordinal !== null
+        && ordinal === board.nextPancakeOrdinal - 1
+        && !remainingItems.some(item => item.id === latest.id)
+        && !remainingRecords.some(record => record.id === latest.id)
+        && !remainingCompletionItems.some(item => item.id === latest.id);
+      return normalizeChangedBoard({
+        ...base,
+        generation:board.generation + 1,
+        items:remainingItems,
+        nextPancakeOrdinal:canReuseId ? ordinal : board.nextPancakeOrdinal,
+        undoHistory:remainingHistory,
+      });
     }
     if (latest.type === "move") {
       const item = canonicalItems.find(candidate => candidate.id === latest.id);

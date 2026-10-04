@@ -11,7 +11,7 @@ import { downloadExecutionRecords } from "@/lib/execution-record-export";
 import { createUuid } from "@/lib/uuid";
 
 type DropTarget = { plate:1|2; x:number; y:number; cellIndex:number; valid:boolean; reason:"occupied"|"over_capacity"|null };
-type Contact = { pointerId:number; x:number; y:number; max:number; item:Pancake|null; action:"left"|"right"|null; plate:1|2; targetX:number; targetY:number; grabOffsetX:number; grabOffsetY:number; longPressTimer:number|null; dragging:boolean; drop:DropTarget|null };
+type Contact = { pointerId:number; expectedGeneration:number; x:number; y:number; max:number; item:Pancake|null; action:"left"|"right"|null; plate:1|2; targetX:number; targetY:number; grabOffsetX:number; grabOffsetY:number; longPressTimer:number|null; dragging:boolean; drop:DropTarget|null };
 type ModelContext = { registerTool:(tool:Record<string,unknown>, options:{signal:AbortSignal}) => unknown };
 type KitchenController = {
  snapshot:Snapshot|null;
@@ -80,6 +80,13 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  const actions = useRef(kitchen);
  useEffect(()=>{actions.current=kitchen;},[kitchen]);
  const available = connection === "online";
+ const observedGeneration = useRef<number|null>(snapshot?.generation ?? null);
+ useEffect(()=>{
+   const nextGeneration=snapshot?.generation ?? null;
+   if(observedGeneration.current===nextGeneration)return;
+   observedGeneration.current=nextGeneration;
+   cancelActiveContact();
+ },[snapshot?.generation]);
  const items = snapshot?.items ?? [];
  const gridBlocked = isGridOverCapacity(items);
  const completionItems = snapshot?.completionItems ?? [];
@@ -105,10 +112,11 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      await actions.current.sync();
      return actions.current.getSnapshot();
    }});
-   register({name:"operate_kitchen",title:"お好み焼きを操作",description:"楕円の追加(create)、固定90秒計測の開始(start)、温度を1℃変更(adjust)、鉄板間の移動(move)、焼き上がり楕円の完成ボックス移動(remove)、完成ボックス項目の提供/提供不可確定(remove)、直近の配置・移動の取り消し(undo)を実行します。取り消しは直近50件までで、タイマー開始・温度変更・完成ボックス移動・提供操作を行うと、それ以前の取り消し履歴は消えます。画面と同じ共有データを変更します。operationIdはUUID v4です。undoではread_kitchenのundoHistory末尾にあるoperationIdをexpectedUndoOperationIdへ指定します。createではidを指定せず、配置順に採番します。他の操作には対象のidと取得したversionをexpectedVersionで指定します。",inputSchema:{type:"object",properties:{operationId:{type:"string"},type:{enum:["create","start","adjust","move","remove","undo"]},id:{type:"string"},plate:{enum:[1,2]},x:{type:"number",minimum:0,maximum:1},y:{type:"number",minimum:0,maximum:1},expectedVersion:{type:"integer",minimum:1},expectedUndoOperationId:{type:"string"},delta:{enum:[-1,1]}},required:["operationId","type"],additionalProperties:false},annotations:{readOnlyHint:false},execute:async(input:unknown)=>{
+   register({name:"operate_kitchen",title:"お好み焼きを操作",description:"楕円の追加(create)、固定90秒計測の開始(start)、温度を1℃変更(adjust)、鉄板間の移動(move)、焼き上がり楕円の完成ボックス移動(remove)、完成ボックス項目の提供/提供不可確定(remove)、直近の配置・移動の取り消し(undo)を実行します。取り消しは直近50件までで、タイマー開始・温度変更・完成ボックス移動・提供操作を行うと、それ以前の取り消し履歴は消えます。画面と同じ共有データを変更します。operationIdはUUID v4です。read_kitchenで取得したgenerationをexpectedGenerationに必ず指定してください。undoではread_kitchenのundoHistory末尾にあるoperationIdをexpectedUndoOperationIdへ指定します。createではidを指定せず、配置順に採番します。他の操作には対象のidと取得したversionをexpectedVersionで指定します。",inputSchema:{type:"object",properties:{operationId:{type:"string"},expectedGeneration:{type:"integer",minimum:0},type:{enum:["create","start","adjust","move","remove","undo"]},id:{type:"string"},plate:{enum:[1,2]},x:{type:"number",minimum:0,maximum:1},y:{type:"number",minimum:0,maximum:1},expectedVersion:{type:"integer",minimum:1},expectedUndoOperationId:{type:"string"},delta:{enum:[-1,1]}},required:["operationId","type","expectedGeneration"],additionalProperties:false},annotations:{readOnlyHint:false},execute:async(input:unknown)=>{
      const command = parseCommand(input);
-     const result = await actions.current.send(command);
-     return {revision:result.revision,items:result.items,completionItems:result.completionItems,records:result.records,undoHistory:result.undoHistory};
+     if(command.expectedGeneration===undefined) throw new Error("read_kitchenで取得したgenerationをexpectedGenerationに指定してください。");
+     const result = await actions.current.send({...command,expectedGeneration:command.expectedGeneration});
+     return {revision:result.revision,generation:result.generation,items:result.items,completionItems:result.completionItems,records:result.records,undoHistory:result.undoHistory};
    }});
    return ()=>lifecycle.abort();
  },[]);
@@ -137,15 +145,27 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      toast.success("調理データを初期化しました。次のIDは1-1です。",{duration:2400});
    }).catch(()=>{}).finally(()=>{resetSubmitting.current=false;});
  }
- function perform(item:Pancake, action:string) {
+ function perform(item:Pancake, action:string, expectedGeneration?:number) {
    const current = timer(item,kitchen.currentTime());
-   const base = {operationId:createUuid(),id:item.id,expectedVersion:item.version};
+   const base = {operationId:createUuid(),id:item.id,expectedVersion:item.version,...(expectedGeneration===undefined?{}:{expectedGeneration})};
    if (action==="tap" && current.state==="blank") run({...base,type:"start"});
    else if ((action==="left"||action==="right") && current.state!=="done") run({...base,type:"adjust",delta:action==="right"?1:-1});
    else if ((action==="tap"||action==="up") && current.state==="done") run({...base,type:"remove"});
  }
  function clearLongPressTimer(current:Contact) {
    if(current.longPressTimer!==null) { window.clearTimeout(current.longPressTimer); current.longPressTimer=null; }
+ }
+ function cancelActiveContact() {
+   const current=contact.current;
+   if(current) {
+     clearLongPressTimer(current);
+     for(const svg of Object.values(plateSvgs.current)) {
+       if(svg?.hasPointerCapture(current.pointerId)) svg.releasePointerCapture(current.pointerId);
+     }
+   }
+   contact.current=null;
+   setPressed(null);
+   setDragPreview(null);
  }
  function dropTargetAt(clientX:number,clientY:number,id:string,offsetX=0,offsetY=0):DropTarget|null {
    for(const plate of [1,2] as const) {
@@ -161,7 +181,8 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    return null;
  }
  function down(event:PointerEvent<SVGSVGElement>,plate:1|2) {
-   if (!available || !event.isPrimary || event.button!==0 || contact.current) return;
+   const expectedGeneration=snapshot?.generation;
+   if (!available || expectedGeneration===undefined || !event.isPrimary || event.button!==0 || contact.current) return;
    const element = event.target as Element;
    const target = element.closest("[data-item-id]");
    const item = items.find(i=>i.id===target?.getAttribute("data-item-id")) ?? null;
@@ -169,7 +190,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    const action = element.closest("[data-item-action]")?.getAttribute("data-item-action");
    const bounds=event.currentTarget.getBoundingClientRect();
    const targetX=(event.clientX-bounds.left)/bounds.width,targetY=(event.clientY-bounds.top)/bounds.height;
-   const current:Contact={pointerId:event.pointerId,x:event.clientX,y:event.clientY,max:0,item,action:action==="left"||action==="right"?action:null,plate,targetX,targetY,grabOffsetX:item?item.x-targetX:0,grabOffsetY:item?item.y-targetY:0,longPressTimer:null,dragging:false,drop:null};
+   const current:Contact={pointerId:event.pointerId,expectedGeneration,x:event.clientX,y:event.clientY,max:0,item,action:action==="left"||action==="right"?action:null,plate,targetX,targetY,grabOffsetX:item?item.x-targetX:0,grabOffsetY:item?item.y-targetY:0,longPressTimer:null,dragging:false,drop:null};
    contact.current=current;
    setPressed(item?.id??null);
    if(item&&!current.action) current.longPressTimer=window.setTimeout(()=>{
@@ -201,23 +222,23 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    clearLongPressTimer(c);
    contact.current=null; setPressed(null); setDragPreview(null);
    if(event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-   if(!available) return;
+   if(!available||actions.current.getSnapshot()?.generation!==c.expectedGeneration) return;
    if(c.dragging&&c.item) {
      const target=dropTargetAt(event.clientX,event.clientY,c.item.id,c.grabOffsetX,c.grabOffsetY);
      if(!target) return;
      if(!target.valid) { toast.error(target.reason==="over_capacity"?"6枚を超えている鉄板には移動できません。空きのある別の鉄板へ移動してください。":"このマスは使用中のため移動できません。"); return; }
      if(target.plate===c.item.plate&&Math.abs(target.x-c.item.x)<0.000001&&Math.abs(target.y-c.item.y)<0.000001) return;
-     const base={operationId:createUuid(),id:c.item.id,expectedVersion:c.item.version};
+     const base={operationId:createUuid(),expectedGeneration:c.expectedGeneration,id:c.item.id,expectedVersion:c.item.version};
      run({...base,type:"move",plate:target.plate,x:target.x,y:target.y});
      return;
    }
    if(Math.max(c.max,Math.hypot(event.clientX-c.x,event.clientY-c.y))>=12) return;
-   if(c.item) perform(c.item,c.action??"tap");
+   if(c.item) perform(c.item,c.action??"tap",c.expectedGeneration);
    else {
      if(gridBlocked) { toast.error("各鉄板が6枚以下になるまで配置できません。"); return; }
      const cell=gridCellAt(c.targetX,c.targetY);
      if(isGridCellOccupied(items,c.plate,cell.index)) { toast.error("このマスにはすでに楕円があります。空いているマスをタップしてください。"); return; }
-     run({operationId:createUuid(),type:"create",plate:c.plate,x:cell.x,y:cell.y});
+     run({operationId:createUuid(),expectedGeneration:c.expectedGeneration,type:"create",plate:c.plate,x:cell.x,y:cell.y});
    }
  }
  function cancel(event:PointerEvent<SVGSVGElement>) {
