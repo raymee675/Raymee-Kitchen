@@ -6,11 +6,11 @@ import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
 import { useKitchen } from "@/lib/use-kitchen";
 import { useKitchenLocal } from "@/lib/use-kitchen-local";
-import { GRID_CELLS, GRID_COLUMNS, GRID_ROWS, OVAL_RX, OVAL_RY, completionStatus, completionTimer, gridCellAt, gridDropBlockReason, isGridCellOccupied, isGridOverCapacity, nearestGridCell, timer, parseCommand, type Pancake, type Command, type Snapshot } from "@/lib/kitchen-model";
+import { GRID_CELLS, GRID_COLUMNS, GRID_ROWS, OVAL_RX, OVAL_RY, completionStatus, completionTimer, gridCellAt, gridMoveBlockReason, gridMoveSourceBlockReason, isGridCellOccupied, isGridOverCapacity, nearestGridCell, timer, parseCommand, type GridMoveBlockReason, type Pancake, type Command, type Snapshot } from "@/lib/kitchen-model";
 import { downloadExecutionRecords } from "@/lib/execution-record-export";
 import { createUuid } from "@/lib/uuid";
 
-type DropTarget = { plate:1|2; x:number; y:number; cellIndex:number; valid:boolean; reason:"occupied"|"over_capacity"|null };
+type DropTarget = { plate:1|2; x:number; y:number; cellIndex:number; valid:boolean; reason:GridMoveBlockReason|null };
 type Contact = { pointerId:number; expectedGeneration:number; x:number; y:number; max:number; item:Pancake|null; action:"left"|"right"|null; plate:1|2; targetX:number; targetY:number; grabOffsetX:number; grabOffsetY:number; longPressTimer:number|null; dragging:boolean; drop:DropTarget|null };
 type ModelContext = { registerTool:(tool:Record<string,unknown>, options:{signal:AbortSignal}) => unknown };
 type KitchenController = {
@@ -112,7 +112,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      await actions.current.sync();
      return actions.current.getSnapshot();
    }});
-   register({name:"operate_kitchen",title:"お好み焼きを操作",description:"楕円の追加(create)、固定90秒計測の開始(start)、温度を1℃変更(adjust)、鉄板間の移動(move)、焼き上がり楕円の完成ボックス移動(remove)、完成ボックス項目の提供/提供不可確定(remove)、直近の配置・移動の取り消し(undo)を実行します。取り消しは直近50件までで、タイマー開始・温度変更・完成ボックス移動・提供操作を行うと、それ以前の取り消し履歴は消えます。画面と同じ共有データを変更します。operationIdはUUID v4です。read_kitchenで取得したgenerationをexpectedGenerationに必ず指定してください。undoではread_kitchenのundoHistory末尾にあるoperationIdをexpectedUndoOperationIdへ指定します。createではidを指定せず、配置順に採番します。他の操作には対象のidと取得したversionをexpectedVersionで指定します。",inputSchema:{type:"object",properties:{operationId:{type:"string"},expectedGeneration:{type:"integer",minimum:0},type:{enum:["create","start","adjust","move","remove","undo"]},id:{type:"string"},plate:{enum:[1,2]},x:{type:"number",minimum:0,maximum:1},y:{type:"number",minimum:0,maximum:1},expectedVersion:{type:"integer",minimum:1},expectedUndoOperationId:{type:"string"},delta:{enum:[-1,1]}},required:["operationId","type","expectedGeneration"],additionalProperties:false},annotations:{readOnlyHint:false},execute:async(input:unknown)=>{
+   register({name:"operate_kitchen",title:"お好み焼きを操作",description:"楕円の追加(create)、固定90秒計測の開始(start)、温度を1℃変更(adjust)、同じ鉄板の下段から同じ列の空いた上段への移動(move)、焼き上がり楕円の完成ボックス移動(remove)、完成ボックス項目の提供/提供不可確定(remove)、直近の配置・移動の取り消し(undo)を実行します。上段からの移動、左右・同段・鉄板間の移動はできません。取り消しは直近50件までで、タイマー開始・温度変更・完成ボックス移動・提供操作を行うと、それ以前の取り消し履歴は消えます。画面と同じ共有データを変更します。operationIdはUUID v4です。read_kitchenで取得したgenerationをexpectedGenerationに必ず指定してください。undoではread_kitchenのundoHistory末尾にあるoperationIdをexpectedUndoOperationIdへ指定します。createではidを指定せず、配置順に採番します。他の操作には対象のidと取得したversionをexpectedVersionで指定します。",inputSchema:{type:"object",properties:{operationId:{type:"string"},expectedGeneration:{type:"integer",minimum:0},type:{enum:["create","start","adjust","move","remove","undo"]},id:{type:"string"},plate:{enum:[1,2]},x:{type:"number",minimum:0,maximum:1},y:{type:"number",minimum:0,maximum:1},expectedVersion:{type:"integer",minimum:1},expectedUndoOperationId:{type:"string"},delta:{enum:[-1,1]}},required:["operationId","type","expectedGeneration"],additionalProperties:false},annotations:{readOnlyHint:false},execute:async(input:unknown)=>{
      const command = parseCommand(input);
      if(command.expectedGeneration===undefined) throw new Error("read_kitchenで取得したgenerationをexpectedGenerationに指定してください。");
      const result = await actions.current.send({...command,expectedGeneration:command.expectedGeneration});
@@ -123,7 +123,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
 
  const run = (command:Command) => { void send(command).then(result=>{
    if(command.type==="adjust") { const item=result.items.find(i=>i.id===command.id); if(item) toast.success(`温度を${item.temperature}℃に変更しました。`,{duration:1800}); }
-   else if(command.type==="move") { const item=result.items.find(i=>i.id===command.id); if(item) toast.success(`鉄板${item.plate}へ移動しました。`,{duration:1800}); }
+   else if(command.type==="move") { const item=result.items.find(i=>i.id===command.id); if(item) toast.success("真上のマスへ移動しました。",{duration:1800}); }
    else if(command.type==="remove") {
      const record=result.records.find(item=>item.id===command.id);
      if(result.completionItems.some(item=>item.id===command.id)) toast.success("完成ボックスに移しました。",{duration:1800});
@@ -175,7 +175,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      if(clientX<svgBounds.left||clientX>svgBounds.right||clientY<svgBounds.top||clientY>svgBounds.bottom) continue;
      if(!svgBounds.width||!svgBounds.height) return null;
      const position=nearestGridCell((clientX-svgBounds.left)/svgBounds.width+offsetX,(clientY-svgBounds.top)/svgBounds.height+offsetY);
-     const reason=gridDropBlockReason(items,plate,position.index,id);
+     const reason=gridMoveBlockReason(items,id,plate,position.index);
      return {plate,x:position.x,y:position.y,cellIndex:position.index,valid:reason===null,reason};
    }
    return null;
@@ -193,7 +193,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    const current:Contact={pointerId:event.pointerId,expectedGeneration,x:event.clientX,y:event.clientY,max:0,item,action:action==="left"||action==="right"?action:null,plate,targetX,targetY,grabOffsetX:item?item.x-targetX:0,grabOffsetY:item?item.y-targetY:0,longPressTimer:null,dragging:false,drop:null};
    contact.current=current;
    setPressed(item?.id??null);
-   if(item&&!current.action) current.longPressTimer=window.setTimeout(()=>{
+   if(item&&!current.action&&gridMoveSourceBlockReason(items,item.id)===null) current.longPressTimer=window.setTimeout(()=>{
      if(contact.current!==current||current.max>=12||!current.item) return;
      current.longPressTimer=null;
      current.dragging=true;
@@ -226,8 +226,20 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    if(c.dragging&&c.item) {
      const target=dropTargetAt(event.clientX,event.clientY,c.item.id,c.grabOffsetX,c.grabOffsetY);
      if(!target) return;
-     if(!target.valid) { toast.error(target.reason==="over_capacity"?"6枚を超えている鉄板には移動できません。空きのある別の鉄板へ移動してください。":"このマスは使用中のため移動できません。"); return; }
-     if(target.plate===c.item.plate&&Math.abs(target.x-c.item.x)<0.000001&&Math.abs(target.y-c.item.y)<0.000001) return;
+     if(target.plate===c.item.plate&&target.cellIndex===nearestGridCell(c.item.x,c.item.y).index) return;
+     if(!target.valid) {
+       const messages:Record<GridMoveBlockReason,string>={
+         missing:"このお好み焼きは取り出されています。",
+         source_not_bottom:"上段のお好み焼きは移動できません。",
+         different_plate:"別の鉄板へは移動できません。同じ鉄板で操作してください。",
+         wrong_row:"下段から真上の上段マスへのみ移動できます。",
+         different_column:"同じ列の真上にあるマスへ移動してください。",
+         occupied:"移動先の上段マスは使用中のため移動できません。",
+         over_capacity:"既存の過密状態を保持中のため、この鉄板からは移動できません。焼き上がった楕円を完成ボックスへ移してください。",
+       };
+       toast.error(target.reason?messages[target.reason]:"このマスへは移動できません。");
+       return;
+     }
      const base={operationId:createUuid(),expectedGeneration:c.expectedGeneration,id:c.item.id,expectedVersion:c.item.version};
      run({...base,type:"move",plate:target.plate,x:target.x,y:target.y});
      return;
@@ -269,8 +281,8 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    ? <button className="update-button export-button reset-button" disabled={!snapshot||!available||pendingIds.size>0} onClick={()=>setResetConfirmation(true)}><RotateCcw size={15}/><span>リセット</span></button>
    : <div className="reset-confirmation" role="alert"><span>鉄板・完成ボックス・実行記録・取り消し履歴を消去し、IDを1-1から再開します。{__PAGES_MODE__?"このブラウザーの調理データ":"全端末で共有する調理データ"}が対象です。記録を残す場合は先に書き出してください。</span><button className="update-button reset-confirm" disabled={!available||pendingIds.size>0||resetSubmitting.current} onClick={confirmReset}>初期化を確定</button><button className="reset-cancel" disabled={pendingIds.size>0||resetSubmitting.current} onClick={()=>{if(!resetSubmitting.current)setResetConfirmation(false);}}>キャンセル</button></div>}
  <Dialog open={help} onOpenChange={setHelp}><DialogTrigger asChild><button className="icon-button" aria-label="使い方"><CircleHelp size={21}/></button></DialogTrigger><DialogContent className="help-dialog"><DialogHeader><DialogTitle>鉄板タイマーの使い方</DialogTitle><DialogDescription>{__PAGES_MODE__?"調理状態は、このスマホのブラウザー内だけに保存されます。":"同じ画面を開いたスマホで、調理の状態を共有できます。"}</DialogDescription></DialogHeader>
- <ol className="help-list"><li>鉄板は縦2行・横3列の6マスです。空きマスをタップすると、その中央に白い楕円が置かれます。</li><li>白い楕円をタップすると、90秒で計測が始まります。</li><li>楕円の左右にある矢印をタップして、待機中・計測中の温度を1℃ずつ変更できます。初期温度は96℃です。</li><li>楕円本体を長押しすると、空いているマスへ移動できます。鉄板の外または鉄板の間の隙間で離すと、元の場所に戻ります。</li><li>計測時間は常に90秒です。上から白くなり、0秒で全体が赤くなります。赤い楕円をタップすると、完成ボックスへ移って30分タイマーが始まります。</li><li>完成ボックスを期限前にタップすると提供済みになります。期限を過ぎると青い楕円の「提供不可」に変わり、タップすると履歴に残してボックスから除きます。</li></ol>
- <p className="help-note">「操作を取り消す」では直近50件までの楕円配置・鉄板上の移動を操作順に戻せます。タイマー開始、温度変更、完成ボックスへの移動、提供・提供不可の確定を行うと、それ以前の取り消し履歴は消えます。旧データで1枚の鉄板が6枚を超えている間、新規配置と超過している鉄板への移動は停止します。空きのある別の鉄板へ移すか、焼き上がり後に完成ボックスへ移してください。</p>
+ <ol className="help-list"><li>鉄板は縦2行・横3列の6マスです。空きマスをタップすると、その中央に白い楕円が置かれます。</li><li>白い楕円をタップすると、90秒で計測が始まります。</li><li>楕円の左右にある矢印をタップして、待機中・計測中の温度を1℃ずつ変更できます。初期温度は96℃です。</li><li>下段の楕円本体を長押しすると、同じ鉄板・同じ列の真上にある空いた上段マスへ移動できます。上段の楕円は移動できません。左右・同段・鉄板間の移動はできません。鉄板の外または鉄板の間の隙間で離すと、元の場所に戻ります。</li><li>計測時間は常に90秒です。上から白くなり、0秒で全体が赤くなります。赤い楕円をタップすると、完成ボックスへ移って30分タイマーが始まります。</li><li>完成ボックスを期限前にタップすると提供済みになります。期限を過ぎると青い楕円の「提供不可」に変わり、タップすると履歴に残してボックスから除きます。</li></ol>
+ <p className="help-note">「操作を取り消す」では直近50件までの楕円配置・鉄板上の移動を操作順に戻せます。タイマー開始、温度変更、完成ボックスへの移動、提供・提供不可の確定を行うと、それ以前の取り消し履歴は消えます。過密な旧データは位置を保って表示し、新規配置とその鉄板にある楕円の移動はできません。焼き上がった楕円を完成ボックスへ移すと数が減り、両方の鉄板が6枚以下になれば残りは自動でマスに整理されます。</p>
  <p className="help-note">温度を変更してもタイマーは90秒のままです。調理中は画面を表示してご利用ください。{__PAGES_MODE__?"画面ロック中の通知はありません。":"未接続の間は表示のみとなります。"}</p>
  <p className="help-note">パソコン：Tabで楕円を選択、Enterで開始/取り出し、左右キーで温度を1℃調整。完成ボックスもTabで選択してEnterで操作できます。</p>
  <p className="help-note">記録は「記録を書き出す」からExcelで開けるCSVにできます。温度ごとの加熱秒数に加え、焼き上がり・保管・提供の時刻と最終ステータスを出力します。</p>
@@ -279,7 +291,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  </div></header>
  <div className="overview"><p>調理状況</p><div className="totals"><span>待機 <b>{counts.blank}</b></span><span>調理中 <b>{counts.running}</b></span><span>焼き上がり <b className={counts.done?"finished-count":""}>{counts.done}</b></span><span>完成ボックス <b>{completionItems.length}</b></span></div></div>
  {__PAGES_MODE__&&kitchen.statusMessage&&<div className="status-banner" role="alert">{kitchen.statusMessage}</div>}
- {gridBlocked&&<div className="grid-capacity-warning" role="status">既存の配置数が6マスを超えている鉄板があります。楕円は元の位置のまま保持しています。新規配置とこの鉄板への移動はできません。楕円を長押しし、空いている別の鉄板へ移すか、焼き上がった楕円を完成ボックスへ移してください。両方の鉄板が6枚以下になると、残りを自動でマスへ整理します。</div>}
+ {gridBlocked&&<div className="grid-capacity-warning" role="status">既存の配置数が6マスを超えている鉄板があります。楕円は元の位置のまま保持しています。新規配置と超過している鉄板からの移動はできません。焼き上がった楕円を完成ボックスへ移すと数が減り、両方の鉄板が6枚以下になると残りを自動でマスへ整理します。</div>}
  {__PAGES_MODE__&&kitchen.cacheState==="preparing"&&<div className="status-banner" role="status">オフライン起動用の画面を準備しています。準備が終わるまでインターネット接続を保ってください。</div>}
  {__PAGES_MODE__&&kitchen.cacheState==="unavailable"&&<div className="status-banner" role="status">オフラインで再起動するための保存に失敗しました。アプリを再読み込みして準備状態を確認してください。</div>}
  {!__PAGES_MODE__&&connection==="unauthorized" && <div className="status-banner">この端末は未登録か、利用期限が切れています。<a href="/register">登録画面を開いてください</a> 管理者から登録コードを受け取ってください。</div>}
@@ -312,7 +324,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    const draggedItem=dragPreview?items.find(i=>i.id===dragPreview.id):undefined;
    if(draggedItem&&dragPreview?.plate===plate&&draggedItem.plate!==plate) renderItems.push(draggedItem);
    return <article className="plate-card" key={plate}><header className="plate-heading"><h2><span>0{plate}</span>鉄板 {plate}</h2><span className={plateItems.length>GRID_CELLS.length?"plate-count-overflow":""}>{plateItems.length} / {GRID_CELLS.length} マス</span></header><div className={`plate ${!available?"disabled":""}`} ref={element=>{plateSurfaces.current[plate]=element;}}>
-   <svg ref={element=>{plateSvgs.current[plate]=element;}} viewBox="0 0 1600 900" role="group" aria-label={`鉄板${plate}。3列2行の6マスです。空きマスをタップして配置し、楕円本体を長押しして別の空きマスへ移動`} onPointerDown={e=>down(e,plate)} onPointerMove={move} onPointerUp={up} onPointerCancel={cancel} onLostPointerCapture={cancel} onContextMenu={e=>e.preventDefault()}>
+   <svg ref={element=>{plateSvgs.current[plate]=element;}} viewBox="0 0 1600 900" role="group" aria-label={`鉄板${plate}。3列2行の6マスです。空きマスをタップして配置します。下段の楕円を長押しすると同じ列の空いた上段へ移動できます。上段からの移動、左右・同段・鉄板間の移動はできません。`} onPointerDown={e=>down(e,plate)} onPointerMove={move} onPointerUp={up} onPointerCancel={cancel} onLostPointerCapture={cancel} onContextMenu={e=>e.preventDefault()}>
    <rect width="1600" height="900" fill="transparent"/>
    <g className="plate-grid" pointerEvents="none" aria-hidden="true">
      {Array.from({length:GRID_COLUMNS-1},(_,index)=><line key={`column-${index}`} x1={(index+1)*1600/GRID_COLUMNS} y1="0" x2={(index+1)*1600/GRID_COLUMNS} y2="900"/>)}

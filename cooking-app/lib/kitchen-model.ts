@@ -361,6 +361,26 @@ export function gridDropBlockReason(items: readonly Pancake[], plate:1|2, cellIn
   return null;
 }
 
+export type GridMoveBlockReason = "missing"|"source_not_bottom"|"different_plate"|"wrong_row"|"different_column"|"occupied"|"over_capacity";
+
+export function gridMoveSourceBlockReason(items: readonly Pancake[], id: string): "missing"|"source_not_bottom"|null {
+  const item = items.find(candidate => candidate.id === id);
+  if (!item) return "missing";
+  return nearestGridCell(item.x, item.y).row === GRID_ROWS - 1 ? null : "source_not_bottom";
+}
+
+export function gridMoveBlockReason(items: readonly Pancake[], id: string, plate:1|2, cellIndex:number): GridMoveBlockReason|null {
+  const item = items.find(candidate => candidate.id === id);
+  if (!item) return "missing";
+  const source = nearestGridCell(item.x, item.y);
+  if (source.row !== GRID_ROWS - 1) return "source_not_bottom";
+  const destination = GRID_CELLS[cellIndex];
+  if (plate !== item.plate) return "different_plate";
+  if (!destination || destination.row !== source.row - 1) return "wrong_row";
+  if (destination.column !== source.column) return "different_column";
+  return gridDropBlockReason(items, plate, cellIndex, id);
+}
+
 function nearestFreeCell(x: number, y: number, occupied: Set<number>): GridCell {
   let nearest: GridCell | undefined;
   let distance = Number.POSITIVE_INFINITY;
@@ -644,7 +664,7 @@ function normalizeChangedBoard(snapshot: Snapshot): Snapshot {
 }
 function requireGridCapacity(items: readonly Pancake[]): void {
   if (isGridOverCapacity(items)) {
-    throw new KitchenError("grid_over_capacity", "各鉄板が6枚以下になるまで、楕円の配置・移動はできません。焼き上がった楕円を完成ボックスへ移してください。");
+    throw new KitchenError("grid_over_capacity", "鉄板の既存配置数が6枚以下になるまで、新しい楕円は配置できません。焼き上がった楕円を完成ボックスへ移してください。");
   }
 }
 export function overlaps(a: {x: number; y: number}, b: {x: number; y: number}) {
@@ -868,12 +888,17 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
   if (command.type === "start") next = {...item, startedAt:now, segments:[{temperature:item.temperature, startedAt:now, endedAt:null}], version:item.version + 1};
   else if (command.type === "move") {
     const position = nearestGridCell(command.x, command.y);
-    const blockReason = gridDropBlockReason(canonicalItems, command.plate, position.index, item.id);
+    const blockReason = gridMoveBlockReason(canonicalItems, item.id, command.plate, position.index);
+    if (blockReason === "missing") throw new KitchenError("removed", "このお好み焼きは取り出されています。");
+    if (blockReason === "source_not_bottom") throw new KitchenError("move_restricted", "上段のお好み焼きは移動できません。");
+    if (blockReason === "different_plate") throw new KitchenError("move_restricted", "別の鉄板へは移動できません。同じ鉄板で操作してください。");
+    if (blockReason === "wrong_row") throw new KitchenError("move_restricted", "下段から真上の上段マスへのみ移動できます。");
+    if (blockReason === "different_column") throw new KitchenError("move_restricted", "同じ列の真上にあるマスへ移動してください。");
     if (blockReason === "over_capacity") {
-      throw new KitchenError("grid_over_capacity", "6枚を超えている鉄板には移動できません。空きのある別の鉄板へ移動してください。");
+      throw new KitchenError("grid_over_capacity", "既存の過密状態を保持中のため、この鉄板からは移動できません。焼き上がった楕円を完成ボックスへ移してください。");
     }
     if (blockReason === "occupied") {
-      throw new KitchenError("cell_occupied", "このマスは使用中のため移動できません。");
+      throw new KitchenError("cell_occupied", "移動先の上段マスは使用中のため移動できません。");
     }
     next = {...item, plate:command.plate, x:position.x, y:position.y, version:item.version + 1};
   }
