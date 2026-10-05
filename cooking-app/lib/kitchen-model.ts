@@ -839,8 +839,11 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
     });
   }
   if (command.type === "create") {
-    requireGridCapacity(canonicalItems);
     const position = nearestGridCell(command.x, command.y);
+    if (position.row !== GRID_ROWS - 1) {
+      throw new KitchenError("upper_row_create_forbidden", "新しい楕円は下段に配置してください。上段は下段からの移動専用です。");
+    }
+    requireGridCapacity(canonicalItems);
     if (isGridCellOccupied(canonicalItems, command.plate, position.index)) throw new KitchenError("cell_occupied", "このマスにはすでに楕円があります。空いているマスをタップしてください。");
     const id = pancakeIdForOrdinal(board.nextPancakeOrdinal);
     const entry:UndoEntry = {operationId:command.operationId, type:"create", id};
