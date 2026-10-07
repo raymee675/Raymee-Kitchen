@@ -293,15 +293,15 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    </g>
    {plateItems.map(item=>{
      const t=timer(item,now); const cx=item.x*1600,cy=item.y*900,rx=OVAL_RX*1600,ry=OVAL_RY*900;
+     const lowerRow=nearestGridCell(item.x,item.y).row===GRID_ROWS-1;
+     const timerY=cy+ry*(lowerRow?-0.68:0.68);
      const busy=pendingIds.has(item.id);
      return <g key={item.id} data-item-id={item.id} data-plate={plate} data-state={t.state} data-duration="90" data-temperature={item.temperature} data-version={item.version} className={`oval ${busy?"pending":""}`}>
        <title>{`お好み焼きID: ${item.id}`}</title>
        <defs><clipPath id={`clip-${item.id}`}><ellipse cx={cx} cy={cy} rx={rx} ry={ry}/></clipPath></defs>
        <ellipse role="button" tabIndex={0} aria-disabled={!available||busy} aria-label={`お好み焼きID ${item.id}、${t.state==="blank"?`待機中、温度${item.temperature}度、タップで90秒の計測を開始`:t.state==="done"?`焼き上がり、温度${item.temperature}度、タップで完成ボックスに移動`:nearestGridCell(item.x,item.y).row===GRID_ROWS-1?`調理中、残り${t.remaining}秒、温度${item.temperature}度、タップで真上の空きマスへ移動`:`調理中、残り${t.remaining}秒、温度${item.temperature}度、上段からは移動できません`}`} cx={cx} cy={cy} rx={rx} ry={ry} fill={t.state==="done"?"#e13b3b":t.state==="blank"?"#fff":"#0c0d0f"} stroke={pressed===item.id?"#ffb276":"#92989f"} strokeWidth={pressed===item.id?9:4} onKeyDown={e=>keyboard(e,item)}/>
        {t.state==="running"&&<rect x={cx-rx} y={cy-ry} width={rx*2} height={ry*2*t.progress} fill="#fff" clipPath={`url(#clip-${item.id})`} pointerEvents="none"/>}
-       <text x={cx} y={cy-49} textAnchor="middle" className="oval-temperature" fontSize="26" fill={t.state==="blank"?"#636d77":t.state==="done"?"#fff":t.progress>0.52?"#353b41":"#ffffff"} pointerEvents="none">{item.temperature}℃</text>
-       <text x={cx} y={cy-29} textAnchor="middle" className="oval-id" fontSize="15" fill={t.state==="blank"?"#636d77":t.state==="done"?"#fff":t.progress>0.52?"#353b41":"#ffffff"} pointerEvents="none">{item.id}</text>
-       {t.state!=="blank"&&<text x={cx} y={cy+49} textAnchor="middle" className="oval-number" fontSize="66" fill={t.state==="done"?"#fff":t.progress>0.79?"#16191e":"#fff"} pointerEvents="none">{t.remaining}</text>}
+       {t.state!=="blank"&&<text x={cx} y={timerY} textAnchor="middle" className="oval-number" fontSize="66" fill={t.state==="done"?"#fff":t.progress>(lowerRow?0.16:0.84)?"#16191e":"#fff"} pointerEvents="none">{t.remaining}</text>}
        {t.state!=="done"&&<>
          <g role="button" tabIndex={0} aria-label="温度を1℃下げる" aria-disabled={!available||busy} data-item-action="left" className="oval-arrow" onKeyDown={e=>keyboard(e,item,"left")}>
            <rect x={cx-rx} y={cy-ry} width="64" height={ry*2} fill="transparent" pointerEvents="all"/>
@@ -318,6 +318,15 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      </g>;
    })}
    </svg>
+   <div className="plate-label-overlay" aria-hidden="true">
+     {plateItems.map(item=>{
+       const lowerRow=nearestGridCell(item.x,item.y).row===GRID_ROWS-1;
+       return <div key={`label-${item.id}`} className={`plate-label${lowerRow?" lower":""}`} style={{left:`${item.x*100}%`}}>
+         <span className="oval-temperature">{item.temperature}℃</span>
+         <span className="oval-id">{item.id}</span>
+       </div>;
+     })}
+   </div>
    {!plateItems.length&&<div className="empty-plate">{snapshot?<Plus size={30} strokeWidth={1}/>:<LoaderCircle className="animate-spin" size={25}/>}<span>{snapshot?"下段の空きマスをタップして配置":__PAGES_MODE__?"保存データを読み込み中":"共有データを読み込み中"}</span></div>}
    </div></article>;
  })}</section>
