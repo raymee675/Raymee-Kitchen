@@ -343,6 +343,12 @@ export function isGridCellOccupied(items: readonly Pancake[], plate: 1 | 2, cell
   return [...assignPlateCells(remaining, plate).values()].some(assigned => assigned.index === cellIndex);
 }
 
+export function isGridCellActuallyOccupied(items: readonly Pancake[], plate: 1 | 2, cellIndex: number, exceptId?: string): boolean {
+  const cell = GRID_CELLS[cellIndex];
+  if (!cell) return true;
+  return items.some(item => item.id !== exceptId && item.plate === plate && overlaps(item, cell));
+}
+
 export function isGridOverCapacity(items: readonly Pick<Pancake, "plate">[]): boolean {
   return !hasGridCapacity(items);
 }

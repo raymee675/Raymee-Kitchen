@@ -6,7 +6,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
 import { useKitchen } from "@/lib/use-kitchen";
 import { useKitchenLocal } from "@/lib/use-kitchen-local";
-import { GRID_CELLS, GRID_COLUMNS, GRID_ROWS, OVAL_RX, OVAL_RY, completionStatus, completionTimer, gridCellAt, gridMoveBlockReason, isGridCellOccupied, isGridOverCapacity, nearestGridCell, timer, parseCommand, type GridMoveBlockReason, type Pancake, type Command, type Snapshot } from "@/lib/kitchen-model";
+import { GRID_CELLS, GRID_COLUMNS, GRID_ROWS, OVAL_RX, OVAL_RY, completionStatus, completionTimer, gridCellAt, gridMoveBlockReason, isGridCellActuallyOccupied, isGridCellOccupied, isGridOverCapacity, nearestGridCell, timer, parseCommand, type GridMoveBlockReason, type Pancake, type Command, type Snapshot } from "@/lib/kitchen-model";
 import { downloadExecutionRecords } from "@/lib/execution-record-export";
 import { createLocalBoardBackup, parseLocalBoardBackup, type ParsedLocalBoardBackup } from "@/lib/local-kitchen-storage";
 import { createUuid } from "@/lib/uuid";
@@ -216,7 +216,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      if(source.row===GRID_ROWS-1) {
        const target=GRID_CELLS[source.index-GRID_COLUMNS];
        if(!target) { toast.error("真上の移動先を確認できませんでした。"); return; }
-       if(isGridCellOccupied(items,item.plate,target.index,item.id)) { run({...base,type:"start"}); return; }
+       if(isGridCellActuallyOccupied(items,item.plate,target.index,item.id)) { run({...base,type:"start"}); return; }
        const reason=gridMoveBlockReason(items,item.id,item.plate,target.index);
        if(reason) { toast.error(gridMoveBlockMessage(reason)); return; }
        run({...base,type:"move",plate:item.plate,x:target.x,y:target.y});
@@ -395,7 +395,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      const t=timer(item,now); const cx=item.x*1600,cy=item.y*900,rx=OVAL_RX*1600,ry=OVAL_RY*900;
      const lowerRow=nearestGridCell(item.x,item.y).row===GRID_ROWS-1;
      const upperCell=lowerRow?GRID_CELLS[nearestGridCell(item.x,item.y).index-GRID_COLUMNS]:undefined;
-     const upperCellOccupied=t.state==="blank"&&lowerRow&&upperCell?isGridCellOccupied(items,item.plate,upperCell.index,item.id):false;
+     const upperCellOccupied=t.state==="blank"&&lowerRow&&upperCell?isGridCellActuallyOccupied(items,item.plate,upperCell.index,item.id):false;
      const blankMoveBlockReason=t.state==="blank"&&lowerRow&&upperCell?gridMoveBlockReason(items,item.id,item.plate,upperCell.index):null;
      const blankTapInstruction=t.state!=="blank"?"":!lowerRow?"タップで90秒の計測を開始":!upperCell?"上段の移動先を確認できません":upperCellOccupied?"上段使用中のためタップで計測開始":blankMoveBlockReason?`${gridMoveBlockMessage(blankMoveBlockReason)} 待機状態です`:"タップで上段へ移動。上段で再度タップすると計測開始";
      const timerY=cy+ry*(lowerRow?-0.68:0.68);
