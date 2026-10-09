@@ -1,6 +1,6 @@
 "use client";
-import { useEffect, useRef, useState, type PointerEvent, type KeyboardEvent } from "react";
-import { Flame, CircleHelp, Plus, ArrowLeft, ArrowRight, LoaderCircle, Download, Undo2, RotateCcw } from "lucide-react";
+import { useEffect, useRef, useState, type PointerEvent, type KeyboardEvent, type ChangeEvent } from "react";
+import { Flame, CircleHelp, Plus, ArrowLeft, ArrowRight, ArrowUp, LoaderCircle, Download, Undo2, RotateCcw, Database } from "lucide-react";
 import { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
@@ -8,6 +8,7 @@ import { useKitchen } from "@/lib/use-kitchen";
 import { useKitchenLocal } from "@/lib/use-kitchen-local";
 import { GRID_CELLS, GRID_COLUMNS, GRID_ROWS, OVAL_RX, OVAL_RY, completionStatus, completionTimer, gridCellAt, gridMoveBlockReason, isGridCellOccupied, isGridOverCapacity, nearestGridCell, timer, parseCommand, type GridMoveBlockReason, type Pancake, type Command, type Snapshot } from "@/lib/kitchen-model";
 import { downloadExecutionRecords } from "@/lib/execution-record-export";
+import { createLocalBoardBackup, parseLocalBoardBackup, type ParsedLocalBoardBackup } from "@/lib/local-kitchen-storage";
 import { createUuid } from "@/lib/uuid";
 
 type Contact = { pointerId:number; expectedGeneration:number; x:number; y:number; max:number; startedAt:number; item:Pancake|null; action:"left"|"right"|null; plate:1|2; targetX:number; targetY:number };
@@ -17,7 +18,10 @@ type KitchenController = {
  now:number;
  connection:"connecting"|"online"|"offline"|"unauthorized";
  pendingIds:Set<string>;
+ backupBusy?:boolean;
+ recoveryAvailable?:boolean;
  send:(command:Command)=>Promise<Snapshot>;
+ restoreBackup?:(backup:ParsedLocalBoardBackup,expectedRevision:number|null)=>Promise<Snapshot>;
  sync:()=>Promise<void>;
  currentTime:()=>number;
  getSnapshot:()=>Snapshot|null;
@@ -82,14 +86,20 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  const kitchen = useController();
  const {snapshot, now, connection, pendingIds, send, sync} = kitchen;
  const [help,setHelp] = useState(false);
+ const [dataManagementOpen,setDataManagementOpen] = useState(false);
+ const [backupDraft,setBackupDraft] = useState<ParsedLocalBoardBackup|null>(null);
+ const [backupReading,setBackupReading] = useState(false);
+ const [temperatureItemId,setTemperatureItemId] = useState<string|null>(null);
  const [resetConfirmation,setResetConfirmation] = useState(false);
  const resetSubmitting=useRef(false);
  const contact = useRef<Contact|null>(null);
+ const backupFileInput = useRef<HTMLInputElement|null>(null);
  const [pressed,setPressed] = useState<string|null>(null);
  const plateSvgs = useRef<Partial<Record<1|2,SVGSVGElement|null>>>({});
  const actions = useRef(kitchen);
  useEffect(()=>{actions.current=kitchen;},[kitchen]);
- const available = connection === "online";
+ const available = connection === "online" && !kitchen.backupBusy;
+ const canRestoreBoard = Boolean(kitchen.recoveryAvailable || (snapshot && available));
  const observedGeneration = useRef<number|null>(snapshot?.generation ?? null);
  useEffect(()=>{
    const nextGeneration=snapshot?.generation ?? null;
@@ -102,9 +112,12 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  const completionItems = snapshot?.completionItems ?? [];
  const counts = {blank:0,running:0,done:0};
  items.forEach(item=>counts[timer(item,now).state]++);
- const records = snapshot?.records ?? [];
- const recordsById = new Map(records.map(record=>[record.id,record]));
- const wakeLock=useScreenWakeLock(__PAGES_MODE__&&counts.running>0);
+  const records = snapshot?.records ?? [];
+  const recordsById = new Map(records.map(record=>[record.id,record]));
+  const temperatureItem = items.find(item=>item.id===temperatureItemId) ?? null;
+  const temperatureCanChange = temperatureItem ? timer(temperatureItem,now).state!=="done" : false;
+  useEffect(()=>{if(temperatureItemId&&!temperatureCanChange)setTemperatureItemId(null);},[temperatureItemId,temperatureCanChange]);
+  const wakeLock=useScreenWakeLock(__PAGES_MODE__&&counts.running>0);
 
  useEffect(()=>{
    const context = (document as Document & {modelContext?:ModelContext}).modelContext;
@@ -142,10 +155,50 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    else if(command.type==="undo") toast.success("直前の操作を取り消しました。",{duration:1800});
  }).catch(()=>{}); };
  function exportRecords() {
-   if (!records.length) return;
-   downloadExecutionRecords(records, kitchen.currentTime());
-   toast.success(`${records.length}件の実行記録を書き出しました。`, {duration:2200});
- }
+    if (!records.length) return;
+    downloadExecutionRecords(records, kitchen.currentTime());
+    toast.success(`${records.length}件の実行記録を書き出しました。`, {duration:2200});
+  }
+  function exportBoardBackup() {
+    if (!snapshot) return;
+    try {
+      const content = createLocalBoardBackup(snapshot, kitchen.currentTime());
+      const date = new Date(kitchen.currentTime()).toISOString().slice(0,10);
+      const url = URL.createObjectURL(new Blob([content], {type:"application/json;charset=utf-8"}));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `teppan-timer-pages-backup-${date}.json`;
+      link.click();
+      window.setTimeout(()=>URL.revokeObjectURL(url),1000);
+      toast.success("盤面バックアップを保存しました。別の場所にも保管してください。", {duration:2600});
+    } catch (error) {
+      toast.error(error instanceof Error?error.message:"バックアップを書き出せませんでした。");
+    }
+  }
+  function selectBackupFile(event:ChangeEvent<HTMLInputElement>) {
+    const input=event.currentTarget;
+    const file=input.files?.[0];
+    input.value="";
+    if(!file)return;
+    setBackupDraft(null);
+    if(file.size>10*1024*1024){toast.error("バックアップファイルは10MB以下を選んでください。現在の盤面は変更していません。");return;}
+    setBackupReading(true);
+    void file.text().then(parseLocalBoardBackup).then(backup=>{
+      setBackupDraft(backup);
+      toast.success("バックアップを確認しました。内容を確認して読み込みを確定してください。",{duration:2400});
+    }).catch(error=>{
+      toast.error(error instanceof Error?error.message:"バックアップを読み込めませんでした。現在の盤面は変更していません。");
+    }).finally(()=>setBackupReading(false));
+  }
+  function restoreBoardBackup() {
+    if(!backupDraft||!canRestoreBoard||!kitchen.restoreBackup||pendingIds.size>0)return;
+    const expectedRevision=kitchen.recoveryAvailable?null:snapshot?.revision??null;
+    void kitchen.restoreBackup(backupDraft,expectedRevision).then(()=>{
+      setBackupDraft(null);
+      setDataManagementOpen(false);
+      toast.success("盤面バックアップを読み込みました。",{duration:2400});
+    }).catch(()=>{});
+  }
  function confirmReset() {
    if(!snapshot||!available||pendingIds.size>0||resetSubmitting.current)return;
    resetSubmitting.current=true;
@@ -229,37 +282,65 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      : ({"Enter":"tap"," ":"tap","ArrowLeft":"left","ArrowRight":"right","ArrowUp":"up","Delete":"up"} as Record<string,string>)[event.key];
    if(action){event.preventDefault();perform(item,action);}
  }
- const connectionLabel = __PAGES_MODE__
-    ? (connection==="online"?"この端末に保存":connection==="connecting"?"準備中":"操作停止中")
-    : {connecting:"接続中",online:"同期中",offline:"未接続",unauthorized:"要端末登録"}[connection];
- const latestUndo=snapshot?.undoHistory.at(-1);
- return <main className="kitchen">
+  const connectionLabel = __PAGES_MODE__
+     ? (kitchen.backupBusy?"復元中":connection==="online"?"この端末に保存":connection==="connecting"?"準備中":"操作停止中")
+     : {connecting:"接続中",online:"同期中",offline:"未接続",unauthorized:"要端末登録"}[connection];
+  const latestUndo=snapshot?.undoHistory.at(-1);
+  return <main className={`kitchen${__PAGES_MODE__?" pages-kitchen":""}`}>
  <Toaster position="top-center" richColors theme="light"/>
  <header className="topbar"><div className="brand"><span className="brand-icon"><Flame size={23}/></span><div><h1>鉄板タイマー</h1><p>TEPPAN TIMER</p></div></div><div className="top-actions"><span className={`connection ${connection}`} role="status">{connectionLabel}</span>
  {__PAGES_MODE__&&counts.running>0&&<span className={`wake-indicator ${wakeLock}`} role="status">{wakeLock==="active"?"画面を点灯中":"端末設定で消灯を延長"}</span>}
- {__PAGES_MODE__&&kitchen.updateReady&&<button className="update-button" disabled={counts.running>0} onClick={()=>kitchen.applyUpdate?.()}>{counts.running>0?"調理後に更新":"更新を適用"}</button>}
+ {__PAGES_MODE__&&kitchen.updateReady&&<button className="update-button" disabled={counts.running>0} onClick={()=>kitchen.applyUpdate?.()}>{counts.running>0?"調理後に更新":"新しい版に更新"}</button>}
  <button className="update-button export-button" aria-label="実行記録をExcel用CSVに書き出す" title="実行記録をExcel用CSVに書き出す" disabled={!snapshot||records.length===0} onClick={exportRecords}><Download size={15}/><span>記録を書き出す</span></button>
  <button className="update-button export-button undo-button" aria-label="直前の操作を取り消す" title={latestUndo?"直前の操作を取り消す":"取り消せる操作はありません"} disabled={!available||pendingIds.size>0||!latestUndo} onClick={()=>{if(latestUndo)run({operationId:createUuid(),type:"undo",expectedUndoOperationId:latestUndo.operationId});}}><Undo2 size={15}/><span>操作を取り消す</span></button>
- {!resetConfirmation
-   ? <button className="update-button export-button reset-button" disabled={!snapshot||!available||pendingIds.size>0} onClick={()=>setResetConfirmation(true)}><RotateCcw size={15}/><span>リセット</span></button>
-   : <div className="reset-confirmation" role="alert"><span>鉄板・完成ボックス・実行記録・取り消し履歴を消去し、IDを1-1から再開します。{__PAGES_MODE__?"このブラウザーの調理データ":"全端末で共有する調理データ"}が対象です。記録を残す場合は先に書き出してください。</span><button className="update-button reset-confirm" disabled={!available||pendingIds.size>0||resetSubmitting.current} onClick={confirmReset}>初期化を確定</button><button className="reset-cancel" disabled={pendingIds.size>0||resetSubmitting.current} onClick={()=>{if(!resetSubmitting.current)setResetConfirmation(false);}}>キャンセル</button></div>}
- <Dialog open={help} onOpenChange={setHelp}><DialogTrigger asChild><button className="icon-button" aria-label="使い方"><CircleHelp size={21}/></button></DialogTrigger><DialogContent className="help-dialog"><DialogHeader><DialogTitle>鉄板タイマーの使い方</DialogTitle><DialogDescription>{__PAGES_MODE__?"調理状態は、このスマホのブラウザー内だけに保存されます。":"同じ画面を開いたスマホで、調理の状態を共有できます。"}</DialogDescription></DialogHeader>
- <ol className="help-list"><li>鉄板は縦2行・横3列の6マスです。新しい楕円は下段の空きマスをタップして配置します。上段は、下段から移動した楕円だけを置ける移動先専用です。</li><li>白い楕円をタップすると、90秒で計測が始まります。調理中の下段の楕円をタップすると、同じ鉄板・同じ列の真上にある空き上段マスへ自動で移動します。移動先が使用中、または鉄板が過密の場合は移動せず、理由を表示します。上段の楕円は移動できません。</li><li>楕円の左右にある矢印をタップして、待機中・計測中の温度を1℃ずつ変更できます。初期温度は96℃です。</li><li>計測時間は常に90秒です。上から白くなり、0秒で全体が赤くなります。赤い楕円をタップすると、完成ボックスへ移って30分タイマーが始まります。</li><li>完成ボックスを期限前にタップすると提供済みになります。期限を過ぎると青い楕円の「提供不可」に変わり、タップすると履歴に残してボックスから除きます。</li></ol>
- <p className="help-note">「操作を取り消す」では直近50件までの楕円配置・鉄板上の移動を操作順に戻せます。タイマー開始、温度変更、完成ボックスへの移動、提供・提供不可の確定を行うと、それ以前の取り消し履歴は消えます。過密な旧データは位置を保って表示し、新規配置とその鉄板にある楕円の移動はできません。焼き上がった楕円を完成ボックスへ移すと数が減り、両方の鉄板が6枚以下になれば残りは自動でマスに整理されます。</p>
- <p className="help-note">温度を変更してもタイマーは90秒のままです。調理中は画面を表示してご利用ください。{__PAGES_MODE__?"画面ロック中の通知はありません。":"未接続の間は表示のみとなります。"}</p>
- <p className="help-note">パソコン：Tabで楕円を選択、Enterで計測開始・下段の調理中楕円の上段移動・焼き上がりの取り出し、左右キーで温度を1℃調整。完成ボックスもTabで選択してEnterで操作できます。</p>
- <p className="help-note">記録は「記録を書き出す」からExcelで開けるCSVにできます。温度ごとの加熱秒数に加え、焼き上がり・保管・提供の時刻と最終ステータスを出力します。</p>
-  <p className="help-note">PC版は通常のブラウザーで利用します。画面ロック中の通知はありません。</p>
- <button className="help-done" onClick={()=>setHelp(false)}>わかりました</button></DialogContent></Dialog>
- </div></header>
+  {!resetConfirmation
+    ? <button className="update-button export-button reset-button" disabled={!snapshot||!available||pendingIds.size>0} onClick={()=>setResetConfirmation(true)}><RotateCcw size={15}/><span>リセット</span></button>
+    : <div className="reset-confirmation" role="alert"><span>鉄板・完成ボックス・実行記録・取り消し履歴を消去し、IDを1-1から再開します。{__PAGES_MODE__?"このブラウザーの調理データ":"全端末で共有する調理データ"}が対象です。{__PAGES_MODE__?"盤面を戻す場合はJSONバックアップ、記録を残す場合はCSVを先に保存してください。":"記録を残す場合は先に書き出してください。"}</span><button className="update-button reset-confirm" disabled={!available||pendingIds.size>0||resetSubmitting.current} onClick={confirmReset}>初期化を確定</button><button className="reset-cancel" disabled={pendingIds.size>0||resetSubmitting.current} onClick={()=>{if(!resetSubmitting.current)setResetConfirmation(false);}}>キャンセル</button></div>}
+  {__PAGES_MODE__&&<Dialog open={dataManagementOpen} onOpenChange={open=>{setDataManagementOpen(open);if(!open){setBackupDraft(null);setBackupReading(false);}}}>
+    <DialogTrigger asChild><button className="update-button export-button data-management-trigger" aria-label="データ管理" title="データ管理" disabled={!canRestoreBoard}><Database size={15}/><span>データ管理</span></button></DialogTrigger>
+    <DialogContent className="data-management-dialog">
+      <DialogHeader><DialogTitle>データ管理</DialogTitle><DialogDescription>{kitchen.recoveryAvailable?"保存データを読み込めません。この画面が編集ロックを保持し、保存領域へ書き込める間だけ、検証済みJSONバックアップから復旧できます。":"データはこのスマートフォンのブラウザー内に保存されます。JSONバックアップは端末のダウンロード先に保存し、必要に応じて別の場所にも保管してください。"}</DialogDescription></DialogHeader>
+      <div className="data-management-actions">
+        <button type="button" className="data-action-button" disabled={!snapshot||!available} onClick={exportBoardBackup}><Database size={18}/><span><strong>盤面バックアップを保存</strong><small>盤面・タイマー・完成ボックス・実行記録・次のIDをJSONに保存</small></span></button>
+        <button type="button" className="data-action-button" disabled={!snapshot||!available||records.length===0} onClick={exportRecords}><Download size={18}/><span><strong>実行記録CSVを書き出す</strong><small>完了した記録のみ。盤面の復元には使えません</small></span></button>
+        <input ref={backupFileInput} className="backup-file-input" type="file" accept=".json,application/json" aria-label="JSONバックアップファイル" onChange={selectBackupFile}/>
+        <button type="button" className="data-action-button" disabled={!canRestoreBoard||backupReading||pendingIds.size>0} onClick={()=>backupFileInput.current?.click()}><Download size={18}/><span><strong>{backupReading?"バックアップを確認中…":kitchen.recoveryAvailable?"JSONバックアップを選んで復旧":"JSONバックアップを選んで復元"}</strong><small>選択後に内容を確認してから、現在の保存データを置き換えます</small></span></button>
+      </div>
+      {backupDraft&&<section className="backup-preview" aria-live="polite">
+        <h3>復元するバックアップ</h3>
+        <p>作成日時：{new Date(backupDraft.exportedAt).toLocaleString("ja-JP")}</p>
+        <p>読み込み後：鉄板上の楕円 {backupDraft.snapshot.items.length}枚・完成ボックス {backupDraft.snapshot.completionItems.length}個・実行記録 {backupDraft.snapshot.records.length}件</p>
+        {kitchen.recoveryAvailable
+          ? <p>置き換え対象：現在の保存データを読み込めません（バックアップから復旧）</p>
+          : <p>置き換え対象：鉄板上の楕円 {items.length}枚・完成ボックス {completionItems.length}個・実行記録 {records.length}件</p>}
+        <p>現在の保存データをこの内容に置き換えます。内容を確認して確定してください。</p>
+        <div><button type="button" className="reset-cancel" disabled={kitchen.backupBusy} onClick={()=>setBackupDraft(null)}>キャンセル</button><button type="button" className="backup-restore-button" disabled={!canRestoreBoard||pendingIds.size>0||kitchen.backupBusy} onClick={restoreBoardBackup}>{kitchen.recoveryAvailable?"このバックアップで復旧":"このデータに置き換える"}</button></div>
+      </section>}
+    </DialogContent>
+  </Dialog>}
+  <Dialog open={help} onOpenChange={setHelp}><DialogTrigger asChild><button className="icon-button" aria-label="使い方"><CircleHelp size={21}/></button></DialogTrigger><DialogContent className="help-dialog"><DialogHeader><DialogTitle>鉄板タイマーの使い方</DialogTitle><DialogDescription>{__PAGES_MODE__?"調理状態は、このスマートフォンのこのブラウザー内だけに保存されます。":"同じ画面を開いたスマホで、調理の状態を共有できます。"}</DialogDescription></DialogHeader>
+  <ol className="help-list"><li>鉄板は縦2行・横3列の6マスです。新しい楕円は下段の空きマスをタップして配置します。上段は、下段から移動した楕円だけを置ける移動先専用です。</li><li>白い楕円をタップすると、固定90秒の計測が始まります。調理中の下段の楕円をタップすると、同じ鉄板・同じ列の真上にある空き上段マスへ移動します。移動先が使用中、または鉄板が過密の場合は移動せず、理由を表示します。上段の楕円は移動できません。</li><li>{__PAGES_MODE__?"待機中・調理中の温度表示をタップして設定画面を開き、＋／−ボタンで1℃ずつ調整できます。焼き上がり後は温度を変更できません。":"楕円の左右にある矢印をタップすると、待機中・計測中の温度を1℃ずつ変更できます。"}初期値は96℃です。この温度は設定・記録用で、センサーの実測値ではありません。計測時間は常に90秒です。</li><li>残り0秒で楕円が赤くなります。赤い楕円をタップすると完成ボックスへ移り、30分の保管タイマーが始まります。期限前に完成ボックスをタップすると提供済みになり、期限後は「提供不可」として履歴に残して取り出せます。</li></ol>
+  <p className="help-note">「操作を取り消す」では直近50件までの楕円配置・鉄板上の移動を操作順に戻せます。タイマー開始、温度変更、完成ボックスへの移動、提供・提供不可の確定を行うと、それ以前の取り消し履歴は消えます。過密な旧データは位置を保って表示し、新規配置とその鉄板にある楕円の移動はできません。</p>
+  {__PAGES_MODE__?<>
+    <p className="help-note">調理状態はこのスマートフォンのこのブラウザー内だけに保存され、PC版や別ブラウザーとは共有されません。サイトデータの削除、ブラウザー変更、端末交換で消えることがあります。定期的に「データ管理」からJSONバックアップを保存してください。CSVは完了した実行記録だけの書き出しで、盤面復元には使えません。</p>
+    <p className="help-note">調理中は画面を表示してご利用ください。画面ロック中にタイマー通知やアラームを鳴らす保証はありません。新しい版の案内が表示されたら、調理を終えてから「新しい版に更新」を押してください。</p>
+  </>:<>
+    <p className="help-note">未接続の間は表示のみとなります。パソコンではTabで楕円を選択、Enterで計測開始・下段の調理中楕円の上段移動・焼き上がりの取り出し、左右キーで温度を1℃調整できます。</p>
+    <p className="help-note">記録は「記録を書き出す」からExcelで開けるCSVにできます。温度ごとの加熱秒数に加え、焼き上がり・保管・提供の時刻と最終ステータスを出力します。</p>
+    <p className="help-note">PC版は通常のブラウザーで利用します。画面ロック中の通知はありません。</p>
+  </>}
+  <button className="help-done" onClick={()=>setHelp(false)}>わかりました</button></DialogContent></Dialog>
+  </div></header>
+  {__PAGES_MODE__&&<p className="pages-storage-note" role="note">保存先はこのスマートフォンのこのブラウザーです。サイトデータ削除や端末交換に備え、「データ管理」からJSONバックアップを保存してください。</p>}
  <div className="overview"><p>調理状況</p><div className="totals"><span>待機 <b>{counts.blank}</b></span><span>調理中 <b>{counts.running}</b></span><span>焼き上がり <b className={counts.done?"finished-count":""}>{counts.done}</b></span><span>完成ボックス <b>{completionItems.length}</b></span></div></div>
  {__PAGES_MODE__&&kitchen.statusMessage&&<div className="status-banner" role="alert">{kitchen.statusMessage}</div>}
+ {__PAGES_MODE__&&kitchen.recoveryAvailable&&<div className="status-banner" role="alert"><span>編集ロックを保持し、端末の保存領域へ書き込める間は、検証済みJSONバックアップから復旧できます。</span> <button className="update-button" onClick={()=>setDataManagementOpen(true)}>バックアップから復旧</button></div>}
  {gridBlocked&&<div className="grid-capacity-warning" role="status">既存の配置数が6マスを超えている鉄板があります。楕円は元の位置のまま保持しています。新規配置と超過している鉄板からの移動はできません。焼き上がった楕円を完成ボックスへ移すと数が減り、両方の鉄板が6枚以下になると残りを自動でマスへ整理します。</div>}
  {__PAGES_MODE__&&kitchen.cacheState==="preparing"&&<div className="status-banner" role="status">オフライン起動用の画面を準備しています。準備が終わるまでインターネット接続を保ってください。</div>}
  {__PAGES_MODE__&&kitchen.cacheState==="unavailable"&&<div className="status-banner" role="status">オフラインで再起動するための保存に失敗しました。アプリを再読み込みして準備状態を確認してください。</div>}
  {!__PAGES_MODE__&&connection==="unauthorized" && <div className="status-banner">この端末は未登録か、利用期限が切れています。<a href="/register">登録画面を開いてください</a> 管理者から登録コードを受け取ってください。</div>}
  {!__PAGES_MODE__&&connection==="offline" && <div className="status-banner" role="status">接続を確認しています。現在は表示のみです。 <button onClick={()=>void sync()}>再接続</button></div>}
- <section className="completion-box" aria-label="お好み焼き完成ボックス">
+  <section id="completion-box" tabIndex={-1} className="completion-box" aria-label="お好み焼き完成ボックス">
    <header className="completion-box-heading"><div><h2>完成ボックス</h2><p>赤くなったお好み焼きは30分以内に提供</p></div><span>{completionItems.length} 個</span></header>
    <div className="completion-list" role="list">
      {completionItems.map(boxItem=>{
@@ -280,8 +361,9 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      })}
      {!completionItems.length&&<p className="completion-empty">赤い楕円をタップすると、ここに移ります。</p>}
    </div>
- </section>
- <section className="plates" aria-label="鉄板の操作画面">{([1,2] as const).map(plate=>{
+  </section>
+  {__PAGES_MODE__&&completionItems.length>0&&<div className="pages-completion-shortcut"><a href="#completion-box" aria-label={`完成ボックスへ。${completionItems.length}個あります。`}><ArrowUp size={16} aria-hidden="true"/><span>完成ボックスへ <b>{completionItems.length}</b></span></a></div>}
+  <section className="plates" aria-label="鉄板の操作画面">{([1,2] as const).map(plate=>{
    const plateItems=items.filter(i=>i.plate===plate);
    return <article className="plate-card" key={plate}><header className="plate-heading"><h2><span>0{plate}</span>鉄板 {plate}</h2><span className={plateItems.length>GRID_CELLS.length?"plate-count-overflow":""}>{plateItems.length} / {GRID_CELLS.length} マス</span></header><div className={`plate ${!available?"disabled":""}`}>
    <svg ref={element=>{plateSvgs.current[plate]=element;}} viewBox="0 0 1600 900" role="group" aria-label={`鉄板${plate}。3列2行の6マスです。新しい楕円は下段の空きマスをタップして配置します。下段の調理中の楕円をタップすると同じ列の空いた上段へ移動します。上段は移動先専用で、上段からの移動、左右・同段・鉄板間の移動はできません。`} onPointerDown={e=>down(e,plate)} onPointerMove={move} onPointerUp={up} onPointerCancel={cancel} onLostPointerCapture={cancel} onContextMenu={e=>e.preventDefault()}>
@@ -304,12 +386,12 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
        {t.state!=="blank"&&<text x={cx} y={timerY} textAnchor="middle" className="oval-number" fontSize="66" fill={t.state==="done"?"#fff":t.progress>(lowerRow?0.16:0.84)?"#16191e":"#fff"} pointerEvents="none">{t.remaining}</text>}
        {t.state!=="done"&&<>
          <g role="button" tabIndex={0} aria-label="温度を1℃下げる" aria-disabled={!available||busy} data-item-action="left" className="oval-arrow" onKeyDown={e=>keyboard(e,item,"left")}>
-           <rect x={cx-rx} y={cy-ry} width="64" height={ry*2} fill="transparent" pointerEvents="all"/>
+          <rect x={cx-rx} y={cy-ry} width={__PAGES_MODE__?"96":"64"} height={ry*2} fill="transparent" pointerEvents="all"/>
            <rect x={cx-rx+13} y={cy-38} width="46" height="76" rx="14" fill="#d94f16" pointerEvents="none"/>
            <path d={`M ${cx-rx+43} ${cy-17} l -17 17 17 17`} fill="none" stroke="#fff" strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" pointerEvents="none"/>
          </g>
          <g role="button" tabIndex={0} aria-label="温度を1℃上げる" aria-disabled={!available||busy} data-item-action="right" className="oval-arrow" onKeyDown={e=>keyboard(e,item,"right")}>
-           <rect x={cx+rx-64} y={cy-ry} width="64" height={ry*2} fill="transparent" pointerEvents="all"/>
+          <rect x={cx+rx-(__PAGES_MODE__?96:64)} y={cy-ry} width={__PAGES_MODE__?"96":"64"} height={ry*2} fill="transparent" pointerEvents="all"/>
            <rect x={cx+rx-59} y={cy-38} width="46" height="76" rx="14" fill="#d94f16" pointerEvents="none"/>
            <path d={`M ${cx+rx-43} ${cy-17} l 17 17 -17 17`} fill="none" stroke="#fff" strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" pointerEvents="none"/>
          </g>
@@ -318,19 +400,29 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      </g>;
    })}
    </svg>
-   <div className="plate-label-overlay" aria-hidden="true">
-     {plateItems.map(item=>{
-       const lowerRow=nearestGridCell(item.x,item.y).row===GRID_ROWS-1;
-       return <div key={`label-${item.id}`} className={`plate-label${lowerRow?" lower":""}`} style={{left:`${item.x*100}%`}}>
-         <span className="oval-temperature">{item.temperature}℃</span>
-         <span className="oval-id">{item.id}</span>
+    <div className="plate-label-overlay" aria-hidden={!__PAGES_MODE__}>
+      {plateItems.map(item=>{
+        const lowerRow=nearestGridCell(item.x,item.y).row===GRID_ROWS-1;
+        const itemState=timer(item,now).state;
+        return <div key={`label-${item.id}`} className={`plate-label${lowerRow?" lower":""}`} style={{left:`${item.x*100}%`}}>
+          {__PAGES_MODE__&&itemState!=="done"
+            ? <button type="button" className="temperature-open-button" aria-label={`お好み焼きID ${item.id}、温度${item.temperature}℃。タップして温度を調整`} disabled={!available||pendingIds.has(item.id)} onClick={()=>setTemperatureItemId(item.id)}><span>{item.temperature}℃</span><small>タップで調整</small></button>
+            : <span className="oval-temperature">{item.temperature}℃</span>}
+          <span className="oval-id">{item.id}</span>
        </div>;
      })}
    </div>
-   {!plateItems.length&&<div className="empty-plate">{snapshot?<Plus size={30} strokeWidth={1}/>:<LoaderCircle className="animate-spin" size={25}/>}<span>{snapshot?"下段の空きマスをタップして配置":__PAGES_MODE__?"保存データを読み込み中":"共有データを読み込み中"}</span></div>}
+   {!plateItems.length&&<div className="empty-plate">{snapshot?<Plus size={30} strokeWidth={1}/>:__PAGES_MODE__&&kitchen.recoveryAvailable?<Database size={25}/>:<LoaderCircle className="animate-spin" size={25}/>}<span>{snapshot?"下段の空きマスをタップして配置":__PAGES_MODE__&&kitchen.recoveryAvailable?"データ管理からバックアップを復旧":__PAGES_MODE__?"保存データを読み込み中":"共有データを読み込み中"}</span></div>}
    </div></article>;
  })}</section>
- <footer className="guide"><div><span className="guide-mark">1</span><span>下段の空白・調理中の楕円をタップ<b>空白は配置、調理中は真上へ移動</b></span></div><div><span className="guide-arrows"><ArrowLeft size={19}/><ArrowRight size={19}/></span><span>左右の矢印をタップ<b>温度を1℃調整</b></span></div><div><span className="guide-red-dot" aria-hidden="true"/><span>赤い楕円をタップ<b>完成ボックスへ</b></span></div><div><span className="guide-mark">30</span><span>完成ボックスをタップ<b>提供/提供不可</b></span></div></footer>
+  {__PAGES_MODE__
+    ? <footer className="guide pages-guide"><div><span className="guide-mark">1</span><span>下段の空きマスをタップ<b>新しい楕円を置く</b></span></div><div><span className="guide-mark">白</span><span>白い楕円をタップ<b>90秒計測を開始</b></span></div><div><span className="guide-mark">移</span><span>調理中の下段楕円をタップ<b>真上の空きマスへ</b></span></div><div><span className="guide-red-dot" aria-hidden="true"/><span>赤い楕円をタップ<b>完成ボックスへ</b></span></div><div><span className="guide-mark">30</span><span>完成ボックスをタップ<b>提供済み／提供不可</b></span></div><p>待機中・調理中の温度表示をタップして設定画面を開き、＋／−ボタンで調整します。焼き上がり後は温度を変更できません。温度は記録用（実測値ではありません）で、計測時間は固定90秒です。</p></footer>
+    : <footer className="guide"><div><span className="guide-mark">1</span><span>下段の空白・調理中の楕円をタップ<b>空白は配置、調理中は真上へ移動</b></span></div><div><span className="guide-arrows"><ArrowLeft size={19}/><ArrowRight size={19}/></span><span>左右の矢印をタップ<b>温度を1℃調整</b></span></div><div><span className="guide-red-dot" aria-hidden="true"/><span>赤い楕円をタップ<b>完成ボックスへ</b></span></div><div><span className="guide-mark">30</span><span>完成ボックスをタップ<b>提供/提供不可</b></span></div></footer>}
+  {__PAGES_MODE__&&<Dialog open={temperatureItem!==null} onOpenChange={open=>{if(!open)setTemperatureItemId(null);}}>
+    <DialogContent className="temperature-dialog"><DialogHeader><DialogTitle>温度を調整</DialogTitle><DialogDescription>{temperatureItem?`お好み焼きID ${temperatureItem.id}の設定温度です。実測センサー値ではありません。計測時間は固定90秒です。`:"温度を1℃ずつ調整します。"}</DialogDescription></DialogHeader>
+      {temperatureItem&&<><p className="temperature-dialog-value">{temperatureItem.temperature}℃</p><div className="temperature-stepper"><button type="button" aria-label="温度を1℃下げる" disabled={!available||pendingIds.has(temperatureItem.id)||!temperatureCanChange} onClick={()=>perform(temperatureItem,"left")}>−1℃</button><button type="button" aria-label="温度を1℃上げる" disabled={!available||pendingIds.has(temperatureItem.id)||!temperatureCanChange} onClick={()=>perform(temperatureItem,"right")}>＋1℃</button></div></>}
+    </DialogContent>
+  </Dialog>}
  </main>;
 }
 
