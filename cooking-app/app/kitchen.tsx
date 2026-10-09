@@ -89,7 +89,6 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  const [dataManagementOpen,setDataManagementOpen] = useState(false);
  const [backupDraft,setBackupDraft] = useState<ParsedLocalBoardBackup|null>(null);
  const [backupReading,setBackupReading] = useState(false);
- const [temperatureItemId,setTemperatureItemId] = useState<string|null>(null);
  const [selectedPlate,setSelectedPlate] = useState<1|2>(1);
  const [resetConfirmation,setResetConfirmation] = useState(false);
  const resetSubmitting=useRef(false);
@@ -115,9 +114,6 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  items.forEach(item=>counts[timer(item,now).state]++);
   const records = snapshot?.records ?? [];
   const recordsById = new Map(records.map(record=>[record.id,record]));
-  const temperatureItem = items.find(item=>item.id===temperatureItemId) ?? null;
-  const temperatureCanChange = temperatureItem ? timer(temperatureItem,now).state!=="done" : false;
-  useEffect(()=>{if(temperatureItemId&&!temperatureCanChange)setTemperatureItemId(null);},[temperatureItemId,temperatureCanChange]);
   const wakeLock=useScreenWakeLock(__PAGES_MODE__&&counts.running>0);
 
  useEffect(()=>{
@@ -332,7 +328,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
     </DialogContent>
   </Dialog>}
   <Dialog open={help} onOpenChange={setHelp}><DialogTrigger asChild><button className="icon-button" aria-label="使い方"><CircleHelp size={21}/></button></DialogTrigger><DialogContent className="help-dialog"><DialogHeader><DialogTitle>鉄板タイマーの使い方</DialogTitle><DialogDescription>{__PAGES_MODE__?"調理状態は、このスマートフォンのこのブラウザー内だけに保存されます。":"同じ画面を開いたスマホで、調理の状態を共有できます。"}</DialogDescription></DialogHeader>
-  <ol className="help-list"><li>鉄板は縦2行・横3列の6マスです。新しい楕円は下段の空きマスをタップして配置します。上段は、下段から移動した楕円だけを置ける移動先専用です。</li><li>下段の待機中の楕円は、同じ鉄板・同じ列の上段が空いていればタップで上段へ移動します。上段が埋まっている場合は計測を始めます。移動できない配置の場合は元の場所に残り、理由を表示します。上段の待機中の楕円をタップすると固定90秒の計測が始まります。調理中の下段の楕円をタップすると、同じ鉄板・同じ列の真上にある空き上段マスへ移動します。移動先が使用中、または鉄板が過密の場合は移動せず、理由を表示します。上段の楕円は移動できません。</li><li>{__PAGES_MODE__?"待機中・調理中の温度表示をタップして設定画面を開き、＋／−ボタンで1℃ずつ調整できます。焼き上がり後は温度を変更できません。":"楕円の左右にある矢印をタップすると、待機中・計測中の温度を1℃ずつ変更できます。"}初期値は96℃です。この温度は設定・記録用で、センサーの実測値ではありません。計測時間は常に90秒です。</li><li>残り0秒で楕円が赤くなります。赤い楕円をタップすると完成ボックスへ移り、30分の保管タイマーが始まります。期限前に完成ボックスをタップすると提供済みになり、期限後は「提供不可」として履歴に残して取り出せます。</li></ol>
+  <ol className="help-list"><li>鉄板は縦2行・横3列の6マスです。新しい楕円は下段の空きマスをタップして配置します。上段は、下段から移動した楕円だけを置ける移動先専用です。</li><li>下段の待機中の楕円は、同じ鉄板・同じ列の上段が空いていればタップで上段へ移動します。上段が埋まっている場合は計測を始めます。移動できない配置の場合は元の場所に残り、理由を表示します。上段の待機中の楕円をタップすると固定90秒の計測が始まります。調理中の下段の楕円をタップすると、同じ鉄板・同じ列の真上にある空き上段マスへ移動します。移動先が使用中、または鉄板が過密の場合は移動せず、理由を表示します。上段の楕円は移動できません。</li><li>楕円の左右にある矢印をタップすると、待機中・計測中の温度を1℃ずつ変更できます。焼き上がり後は変更できません。初期値は96℃です。この温度は設定・記録用で、センサーの実測値ではありません。計測時間は常に90秒です。</li><li>残り0秒で楕円が赤くなります。赤い楕円をタップすると完成ボックスへ移り、30分の保管タイマーが始まります。期限前に完成ボックスをタップすると提供済みになり、期限後は「提供不可」として履歴に残して取り出せます。</li></ol>
   <p className="help-note">「操作を取り消す」では直近50件までの楕円配置・鉄板上の移動を操作順に戻せます。タイマー開始、温度変更、完成ボックスへの移動、提供・提供不可の確定を行うと、それ以前の取り消し履歴は消えます。過密な旧データは位置を保って表示し、新規配置とその鉄板にある楕円の移動はできません。</p>
   {__PAGES_MODE__?<>
     <p className="help-note">調理状態はこのスマートフォンのこのブラウザー内だけに保存され、PC版や別ブラウザーとは共有されません。サイトデータの削除、ブラウザー変更、端末交換で消えることがあります。定期的に「データ管理」からJSONバックアップを保存してください。CSVは完了した実行記録だけの書き出しで、盤面復元には使えません。</p>
@@ -425,11 +421,8 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
     <div className="plate-label-overlay" aria-hidden={!__PAGES_MODE__}>
       {plateItems.map(item=>{
         const lowerRow=nearestGridCell(item.x,item.y).row===GRID_ROWS-1;
-        const itemState=timer(item,now).state;
         return <div key={`label-${item.id}`} className={`plate-label${lowerRow?" lower":""}`} style={{left:`${item.x*100}%`}}>
-          {__PAGES_MODE__&&itemState!=="done"
-            ? <button type="button" className="temperature-open-button" aria-label={`お好み焼きID ${item.id}、温度${item.temperature}℃。タップして温度を調整`} disabled={!available||pendingIds.has(item.id)} onClick={()=>setTemperatureItemId(item.id)}><span>{item.temperature}℃</span><small>タップで調整</small></button>
-            : <span className="oval-temperature">{item.temperature}℃</span>}
+          <span className="oval-temperature">{item.temperature}℃</span>
           <span className="oval-id">{item.id}</span>
        </div>;
      })}
@@ -438,13 +431,8 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    </div></article>;
  })}</section>
   {__PAGES_MODE__
-    ? <footer className="guide pages-guide"><div><span className="guide-mark">1</span><span>下段の空きマスをタップ<b>新しい楕円を置く</b></span></div><div><span className="guide-mark">白</span><span>白い上段楕円をタップ<b>90秒計測を開始</b></span></div><div><span className="guide-mark">移</span><span>下段の楕円をタップ<b>待機中は空き上段へ、調理中も真上へ</b></span></div><div><span className="guide-red-dot" aria-hidden="true"/><span>赤い楕円をタップ<b>完成ボックスへ</b></span></div><div><span className="guide-mark">30</span><span>完成ボックスをタップ<b>提供済み／提供不可</b></span></div><p>上段に空きがない下段の待機中楕円はタップで計測を開始します。待機中・調理中の温度表示をタップして設定画面を開き、＋／−ボタンで調整します。焼き上がり後は温度を変更できません。温度は記録用（実測値ではありません）で、計測時間は固定90秒です。</p></footer>
+    ? <footer className="guide pages-guide"><div><span className="guide-mark">1</span><span>下段の空きマスをタップ<b>新しい楕円を置く</b></span></div><div><span className="guide-mark">白</span><span>白い上段楕円をタップ<b>90秒計測を開始</b></span></div><div><span className="guide-mark">移</span><span>下段の楕円をタップ<b>待機中は空き上段へ、調理中も真上へ</b></span></div><div><span className="guide-red-dot" aria-hidden="true"/><span>赤い楕円をタップ<b>完成ボックスへ</b></span></div><div><span className="guide-mark">30</span><span>完成ボックスをタップ<b>提供済み／提供不可</b></span></div><p>上段に空きがない下段の待機中楕円はタップで計測を開始します。楕円の左右にある矢印で、待機中・計測中の温度を1℃ずつ調節できます。焼き上がり後は変更できません。温度は記録用（実測値ではありません）で、計測時間は固定90秒です。</p></footer>
     : <footer className="guide"><div><span className="guide-mark">1</span><span>下段の楕円をタップ<b>空白は配置、待機中は空き上段へ、調理中は真上へ</b></span></div><div><span className="guide-arrows"><ArrowLeft size={19}/><ArrowRight size={19}/></span><span>左右の矢印をタップ<b>温度を1℃調整</b></span></div><div><span className="guide-red-dot" aria-hidden="true"/><span>赤い楕円をタップ<b>完成ボックスへ</b></span></div><div><span className="guide-mark">30</span><span>完成ボックスをタップ<b>提供/提供不可</b></span></div></footer>}
-  {__PAGES_MODE__&&<Dialog open={temperatureItem!==null} onOpenChange={open=>{if(!open)setTemperatureItemId(null);}}>
-    <DialogContent className="temperature-dialog"><DialogHeader><DialogTitle>温度を調整</DialogTitle><DialogDescription>{temperatureItem?`お好み焼きID ${temperatureItem.id}の設定温度です。実測センサー値ではありません。計測時間は固定90秒です。`:"温度を1℃ずつ調整します。"}</DialogDescription></DialogHeader>
-      {temperatureItem&&<><p className="temperature-dialog-value">{temperatureItem.temperature}℃</p><div className="temperature-stepper"><button type="button" aria-label="温度を1℃下げる" disabled={!available||pendingIds.has(temperatureItem.id)||!temperatureCanChange} onClick={()=>perform(temperatureItem,"left")}>−1℃</button><button type="button" aria-label="温度を1℃上げる" disabled={!available||pendingIds.has(temperatureItem.id)||!temperatureCanChange} onClick={()=>perform(temperatureItem,"right")}>＋1℃</button></div></>}
-    </DialogContent>
-  </Dialog>}
  </main>;
 }
 
