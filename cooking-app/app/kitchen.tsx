@@ -90,6 +90,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  const [backupDraft,setBackupDraft] = useState<ParsedLocalBoardBackup|null>(null);
  const [backupReading,setBackupReading] = useState(false);
  const [temperatureItemId,setTemperatureItemId] = useState<string|null>(null);
+ const [selectedPlate,setSelectedPlate] = useState<1|2>(1);
  const [resetConfirmation,setResetConfirmation] = useState(false);
  const resetSubmitting=useRef(false);
  const contact = useRef<Contact|null>(null);
@@ -375,9 +376,14 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    </div>
   </section>
   {__PAGES_MODE__&&completionItems.length>0&&<div className="pages-completion-shortcut"><a href="#completion-box" aria-label={`完成ボックスへ。${completionItems.length}個あります。`}><ArrowUp size={16} aria-hidden="true"/><span>完成ボックスへ <b>{completionItems.length}</b></span></a></div>}
+  <nav className="plate-switcher" aria-label="鉄板の表示切り替え">
+   <button type="button" aria-label="前の鉄板、鉄板1" disabled={selectedPlate===1} onClick={()=>setSelectedPlate(1)}><ArrowLeft aria-hidden="true" size={20}/></button>
+   <span aria-live="polite">鉄板 {selectedPlate} / 2</span>
+   <button type="button" aria-label="次の鉄板、鉄板2" disabled={selectedPlate===2} onClick={()=>setSelectedPlate(2)}><ArrowRight aria-hidden="true" size={20}/></button>
+  </nav>
   <section className="plates" aria-label="鉄板の操作画面">{([1,2] as const).map(plate=>{
    const plateItems=items.filter(i=>i.plate===plate);
-   return <article className="plate-card" key={plate}><header className="plate-heading"><h2><span>0{plate}</span>鉄板 {plate}</h2><span className={plateItems.length>GRID_CELLS.length?"plate-count-overflow":""}>{plateItems.length} / {GRID_CELLS.length} マス</span></header><div className={`plate ${!available?"disabled":""}`}>
+   return <article className={`plate-card${selectedPlate===plate?" selected":""}`} key={plate}><header className="plate-heading"><h2><span>0{plate}</span>鉄板 {plate}</h2><span className={plateItems.length>GRID_CELLS.length?"plate-count-overflow":""}>{plateItems.length} / {GRID_CELLS.length} マス</span></header><div className={`plate ${!available?"disabled":""}`}>
    <svg ref={element=>{plateSvgs.current[plate]=element;}} viewBox="0 0 1600 900" role="group" aria-label={`鉄板${plate}。3列2行の6マスです。新しい楕円は下段の空きマスをタップして配置します。下段の待機中の楕円は、同じ列の上段が空いていればタップで移動し、移動後にタップすると計測を開始します。上段が使用中なら下段タップで計測を開始します。下段の調理中の楕円はタップすると同じ列の空いた上段へ移動します。上段は移動先専用で、上段からの移動、左右・同段・鉄板間の移動はできません。`} onPointerDown={e=>down(e,plate)} onPointerMove={move} onPointerUp={up} onPointerCancel={cancel} onLostPointerCapture={cancel} onContextMenu={e=>e.preventDefault()}>
    <rect width="1600" height="900" fill="transparent"/>
    <g className="plate-grid" pointerEvents="none" aria-hidden="true">
