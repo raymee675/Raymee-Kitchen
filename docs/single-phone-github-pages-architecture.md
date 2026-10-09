@@ -126,7 +126,11 @@ PCのSQLiteに調理中データが残っている場合、Pages版はそのDB�
 - Pages版の「データ管理」から、現行のlocalStorageデータをJSONで手動書き出しし、検証・確認後に同じデータ領域へ復元する。復元時は既存の保存キーとschemaVersionを維持し、端末内に保存する。CSVは完了済み実行記録のみとして区別する。
 - Pages画面、JSONの検証・書き出し・確認付き復元、保存場所の案内をソースへ追加した。今回の作業ではPagesビルド、公開URL、固定スマートフォンでの動作確認は未実施。新しい画面を公開しただけで古いService Workerキャッシュが自動更新されるとは扱わない。
 
-GitHubへの公開と固定スマホでの操作確認は未実施。作業ツリーにはGitリモートが設定されておらずコミットもないため、Actionsのworkflowファイルまでを用意した。リポジトリへpushした後、Settings > Pagesの公開元をGitHub Actionsに設定するとworkflowが公開する。固定スマホでは機内モード起動、画面ロックからの復帰、ホーム画面から開くブラウザー、複数起動時の操作を確認する。
+## 公開状況（2026-10-09）
+
+- Pages版のスマートフォン向け切替UI、案内・温度調整・完成ボックスへの導線、JSONバックアップ／復元を含む変更を `main` に反映してpushした。
+- GitHub Actions「Deploy cooking timer to GitHub Pages」run 13 は成功。公開URLは[GitHub Pages版の調理画面](https://raymee675.github.io/Raymee-Kitchen/)で、HTMLと更新後のJavaScript・CSSはHTTP 200を返す。
+- 固定スマートフォンでの操作確認は未実施。機内モード起動、画面ロックからの復帰、ホーム画面から開くブラウザー、複数起動時の操作を実機で確認する。
 
 ## 関連する過去の検討
 
