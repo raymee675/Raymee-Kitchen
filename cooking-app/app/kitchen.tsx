@@ -130,7 +130,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      await actions.current.sync();
      return actions.current.getSnapshot();
    }});
-   register({name:"operate_kitchen",title:"お好み焼きを操作",description:"楕円の追加(create)、固定90秒計測の開始(start)、温度を1℃変更(adjust)、同じ鉄板の下段から同じ列の空いた上段への移動(move)、焼き上がり楕円の完成ボックス移動(remove)、完成ボックス項目の提供/提供不可確定(remove)、直近の配置・移動の取り消し(undo)を実行します。新規配置は下段の空きマスのみで、画面では下段の調理中の楕円をタップすると同じ鉄板・同じ列の空いた上段へ自動で移動します。上段は下段からの上向き移動先専用です。上段からの移動、左右・同段・鉄板間の移動はできません。取り消しは直近50件までで、タイマー開始・温度変更・完成ボックス移動・提供操作を行うと、それ以前の取り消し履歴は消えます。画面と同じ共有データを変更します。operationIdはUUID v4です。read_kitchenで取得したgenerationをexpectedGenerationに必ず指定してください。undoではread_kitchenのundoHistory末尾にあるoperationIdをexpectedUndoOperationIdへ指定します。createでは下段の座標を指定し、idは指定せず、配置順に採番します。他の操作には対象のidと取得したversionをexpectedVersionで指定します。",inputSchema:{type:"object",properties:{operationId:{type:"string"},expectedGeneration:{type:"integer",minimum:0},type:{enum:["create","start","adjust","move","remove","undo"]},id:{type:"string"},plate:{enum:[1,2]},x:{type:"number",minimum:0,maximum:1},y:{type:"number",minimum:0,maximum:1},expectedVersion:{type:"integer",minimum:1},expectedUndoOperationId:{type:"string"},delta:{enum:[-1,1]}},required:["operationId","type","expectedGeneration"],additionalProperties:false},annotations:{readOnlyHint:false},execute:async(input:unknown)=>{
+   register({name:"operate_kitchen",title:"お好み焼きを操作",description:"楕円の追加(create)、固定90秒計測の開始(start)、温度を1℃変更(adjust)、同じ鉄板の下段から同じ列の空いた上段への移動(move)、焼き上がり楕円の完成ボックス移動(remove)、完成ボックス項目の提供/提供不可確定(remove)、直近の配置・移動の取り消し(undo)を実行します。新規配置は下段の空きマスのみです。画面では下段の待機中楕円は、同じ列の上段が空いていれば最初のタップでタイマーを始めず上段へ移動し、上段でタップすると計測を開始します。上段が使用中なら下段でタップして計測を開始します。下段の調理中の楕円をタップすると同じ鉄板・同じ列の空いた上段へ移動します。上段は下段からの上向き移動先専用です。上段からの移動、左右・同段・鉄板間の移動はできません。取り消しは直近50件までで、タイマー開始・温度変更・完成ボックス移動・提供操作を行うと、それ以前の取り消し履歴は消えます。画面と同じ共有データを変更します。operationIdはUUID v4です。read_kitchenで取得したgenerationをexpectedGenerationに必ず指定してください。undoではread_kitchenのundoHistory末尾にあるoperationIdをexpectedUndoOperationIdへ指定します。createでは下段の座標を指定し、idは指定せず、配置順に採番します。他の操作には対象のidと取得したversionをexpectedVersionで指定します。",inputSchema:{type:"object",properties:{operationId:{type:"string"},expectedGeneration:{type:"integer",minimum:0},type:{enum:["create","start","adjust","move","remove","undo"]},id:{type:"string"},plate:{enum:[1,2]},x:{type:"number",minimum:0,maximum:1},y:{type:"number",minimum:0,maximum:1},expectedVersion:{type:"integer",minimum:1},expectedUndoOperationId:{type:"string"},delta:{enum:[-1,1]}},required:["operationId","type","expectedGeneration"],additionalProperties:false},annotations:{readOnlyHint:false},execute:async(input:unknown)=>{
      const command = parseCommand(input);
      if(command.expectedGeneration===undefined) throw new Error("read_kitchenで取得したgenerationをexpectedGenerationに指定してください。");
      const result = await actions.current.send({...command,expectedGeneration:command.expectedGeneration});
@@ -210,7 +210,19 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  function perform(item:Pancake, action:string, expectedGeneration?:number) {
    const current = timer(item,kitchen.currentTime());
    const base = {operationId:createUuid(),id:item.id,expectedVersion:item.version,...(expectedGeneration===undefined?{}:{expectedGeneration})};
-   if (action==="tap" && current.state==="blank") run({...base,type:"start"});
+   if (action==="tap" && current.state==="blank") {
+     const source=nearestGridCell(item.x,item.y);
+     if(source.row===GRID_ROWS-1) {
+       const target=GRID_CELLS[source.index-GRID_COLUMNS];
+       if(!target) { toast.error("真上の移動先を確認できませんでした。"); return; }
+       if(isGridCellOccupied(items,item.plate,target.index,item.id)) { run({...base,type:"start"}); return; }
+       const reason=gridMoveBlockReason(items,item.id,item.plate,target.index);
+       if(reason) { toast.error(gridMoveBlockMessage(reason)); return; }
+       run({...base,type:"move",plate:item.plate,x:target.x,y:target.y});
+       return;
+     }
+     run({...base,type:"start"});
+   }
    else if (action==="tap" && current.state==="running") {
      const source=nearestGridCell(item.x,item.y);
      if(source.row!==GRID_ROWS-1) { toast.error("上段のお好み焼きは移動できません。"); return; }
@@ -319,7 +331,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
     </DialogContent>
   </Dialog>}
   <Dialog open={help} onOpenChange={setHelp}><DialogTrigger asChild><button className="icon-button" aria-label="使い方"><CircleHelp size={21}/></button></DialogTrigger><DialogContent className="help-dialog"><DialogHeader><DialogTitle>鉄板タイマーの使い方</DialogTitle><DialogDescription>{__PAGES_MODE__?"調理状態は、このスマートフォンのこのブラウザー内だけに保存されます。":"同じ画面を開いたスマホで、調理の状態を共有できます。"}</DialogDescription></DialogHeader>
-  <ol className="help-list"><li>鉄板は縦2行・横3列の6マスです。新しい楕円は下段の空きマスをタップして配置します。上段は、下段から移動した楕円だけを置ける移動先専用です。</li><li>白い楕円をタップすると、固定90秒の計測が始まります。調理中の下段の楕円をタップすると、同じ鉄板・同じ列の真上にある空き上段マスへ移動します。移動先が使用中、または鉄板が過密の場合は移動せず、理由を表示します。上段の楕円は移動できません。</li><li>{__PAGES_MODE__?"待機中・調理中の温度表示をタップして設定画面を開き、＋／−ボタンで1℃ずつ調整できます。焼き上がり後は温度を変更できません。":"楕円の左右にある矢印をタップすると、待機中・計測中の温度を1℃ずつ変更できます。"}初期値は96℃です。この温度は設定・記録用で、センサーの実測値ではありません。計測時間は常に90秒です。</li><li>残り0秒で楕円が赤くなります。赤い楕円をタップすると完成ボックスへ移り、30分の保管タイマーが始まります。期限前に完成ボックスをタップすると提供済みになり、期限後は「提供不可」として履歴に残して取り出せます。</li></ol>
+  <ol className="help-list"><li>鉄板は縦2行・横3列の6マスです。新しい楕円は下段の空きマスをタップして配置します。上段は、下段から移動した楕円だけを置ける移動先専用です。</li><li>下段の待機中の楕円は、同じ鉄板・同じ列の上段が空いていればタップで上段へ移動します。上段が埋まっている場合は計測を始めます。移動できない配置の場合は元の場所に残り、理由を表示します。上段の待機中の楕円をタップすると固定90秒の計測が始まります。調理中の下段の楕円をタップすると、同じ鉄板・同じ列の真上にある空き上段マスへ移動します。移動先が使用中、または鉄板が過密の場合は移動せず、理由を表示します。上段の楕円は移動できません。</li><li>{__PAGES_MODE__?"待機中・調理中の温度表示をタップして設定画面を開き、＋／−ボタンで1℃ずつ調整できます。焼き上がり後は温度を変更できません。":"楕円の左右にある矢印をタップすると、待機中・計測中の温度を1℃ずつ変更できます。"}初期値は96℃です。この温度は設定・記録用で、センサーの実測値ではありません。計測時間は常に90秒です。</li><li>残り0秒で楕円が赤くなります。赤い楕円をタップすると完成ボックスへ移り、30分の保管タイマーが始まります。期限前に完成ボックスをタップすると提供済みになり、期限後は「提供不可」として履歴に残して取り出せます。</li></ol>
   <p className="help-note">「操作を取り消す」では直近50件までの楕円配置・鉄板上の移動を操作順に戻せます。タイマー開始、温度変更、完成ボックスへの移動、提供・提供不可の確定を行うと、それ以前の取り消し履歴は消えます。過密な旧データは位置を保って表示し、新規配置とその鉄板にある楕円の移動はできません。</p>
   {__PAGES_MODE__?<>
     <p className="help-note">調理状態はこのスマートフォンのこのブラウザー内だけに保存され、PC版や別ブラウザーとは共有されません。サイトデータの削除、ブラウザー変更、端末交換で消えることがあります。定期的に「データ管理」からJSONバックアップを保存してください。CSVは完了した実行記録だけの書き出しで、盤面復元には使えません。</p>
@@ -366,7 +378,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
   <section className="plates" aria-label="鉄板の操作画面">{([1,2] as const).map(plate=>{
    const plateItems=items.filter(i=>i.plate===plate);
    return <article className="plate-card" key={plate}><header className="plate-heading"><h2><span>0{plate}</span>鉄板 {plate}</h2><span className={plateItems.length>GRID_CELLS.length?"plate-count-overflow":""}>{plateItems.length} / {GRID_CELLS.length} マス</span></header><div className={`plate ${!available?"disabled":""}`}>
-   <svg ref={element=>{plateSvgs.current[plate]=element;}} viewBox="0 0 1600 900" role="group" aria-label={`鉄板${plate}。3列2行の6マスです。新しい楕円は下段の空きマスをタップして配置します。下段の調理中の楕円をタップすると同じ列の空いた上段へ移動します。上段は移動先専用で、上段からの移動、左右・同段・鉄板間の移動はできません。`} onPointerDown={e=>down(e,plate)} onPointerMove={move} onPointerUp={up} onPointerCancel={cancel} onLostPointerCapture={cancel} onContextMenu={e=>e.preventDefault()}>
+   <svg ref={element=>{plateSvgs.current[plate]=element;}} viewBox="0 0 1600 900" role="group" aria-label={`鉄板${plate}。3列2行の6マスです。新しい楕円は下段の空きマスをタップして配置します。下段の待機中の楕円は、同じ列の上段が空いていればタップで移動し、移動後にタップすると計測を開始します。上段が使用中なら下段タップで計測を開始します。下段の調理中の楕円はタップすると同じ列の空いた上段へ移動します。上段は移動先専用で、上段からの移動、左右・同段・鉄板間の移動はできません。`} onPointerDown={e=>down(e,plate)} onPointerMove={move} onPointerUp={up} onPointerCancel={cancel} onLostPointerCapture={cancel} onContextMenu={e=>e.preventDefault()}>
    <rect width="1600" height="900" fill="transparent"/>
    <g className="plate-grid" pointerEvents="none" aria-hidden="true">
      {Array.from({length:GRID_COLUMNS-1},(_,index)=><line key={`column-${index}`} x1={(index+1)*1600/GRID_COLUMNS} y1="0" x2={(index+1)*1600/GRID_COLUMNS} y2="900"/>)}
@@ -376,12 +388,16 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    {plateItems.map(item=>{
      const t=timer(item,now); const cx=item.x*1600,cy=item.y*900,rx=OVAL_RX*1600,ry=OVAL_RY*900;
      const lowerRow=nearestGridCell(item.x,item.y).row===GRID_ROWS-1;
+     const upperCell=lowerRow?GRID_CELLS[nearestGridCell(item.x,item.y).index-GRID_COLUMNS]:undefined;
+     const upperCellOccupied=t.state==="blank"&&lowerRow&&upperCell?isGridCellOccupied(items,item.plate,upperCell.index,item.id):false;
+     const blankMoveBlockReason=t.state==="blank"&&lowerRow&&upperCell?gridMoveBlockReason(items,item.id,item.plate,upperCell.index):null;
+     const blankTapInstruction=t.state!=="blank"?"":!lowerRow?"タップで90秒の計測を開始":!upperCell?"上段の移動先を確認できません":upperCellOccupied?"上段使用中のためタップで計測開始":blankMoveBlockReason?`${gridMoveBlockMessage(blankMoveBlockReason)} 待機状態です`:"タップで上段へ移動。上段で再度タップすると計測開始";
      const timerY=cy+ry*(lowerRow?-0.68:0.68);
      const busy=pendingIds.has(item.id);
      return <g key={item.id} data-item-id={item.id} data-plate={plate} data-state={t.state} data-duration="90" data-temperature={item.temperature} data-version={item.version} className={`oval ${busy?"pending":""}`}>
        <title>{`お好み焼きID: ${item.id}`}</title>
        <defs><clipPath id={`clip-${item.id}`}><ellipse cx={cx} cy={cy} rx={rx} ry={ry}/></clipPath></defs>
-       <ellipse role="button" tabIndex={0} aria-disabled={!available||busy} aria-label={`お好み焼きID ${item.id}、${t.state==="blank"?`待機中、温度${item.temperature}度、タップで90秒の計測を開始`:t.state==="done"?`焼き上がり、温度${item.temperature}度、タップで完成ボックスに移動`:nearestGridCell(item.x,item.y).row===GRID_ROWS-1?`調理中、残り${t.remaining}秒、温度${item.temperature}度、タップで真上の空きマスへ移動`:`調理中、残り${t.remaining}秒、温度${item.temperature}度、上段からは移動できません`}`} cx={cx} cy={cy} rx={rx} ry={ry} fill={t.state==="done"?"#e13b3b":t.state==="blank"?"#fff":"#0c0d0f"} stroke={pressed===item.id?"#ffb276":"#92989f"} strokeWidth={pressed===item.id?9:4} onKeyDown={e=>keyboard(e,item)}/>
+       <ellipse role="button" tabIndex={0} aria-disabled={!available||busy} aria-label={`お好み焼きID ${item.id}、${t.state==="blank"?`待機中、温度${item.temperature}度、${blankTapInstruction}`:t.state==="done"?`焼き上がり、温度${item.temperature}度、タップで完成ボックスに移動`:lowerRow?`調理中、残り${t.remaining}秒、温度${item.temperature}度、タップで真上の空きマスへ移動`:`調理中、残り${t.remaining}秒、温度${item.temperature}度、上段からは移動できません`}`} cx={cx} cy={cy} rx={rx} ry={ry} fill={t.state==="done"?"#e13b3b":t.state==="blank"?"#fff":"#0c0d0f"} stroke={pressed===item.id?"#ffb276":"#92989f"} strokeWidth={pressed===item.id?9:4} onKeyDown={e=>keyboard(e,item)}/>
        {t.state==="running"&&<rect x={cx-rx} y={cy-ry} width={rx*2} height={ry*2*t.progress} fill="#fff" clipPath={`url(#clip-${item.id})`} pointerEvents="none"/>}
        {t.state!=="blank"&&<text x={cx} y={timerY} textAnchor="middle" className="oval-number" fontSize="66" fill={t.state==="done"?"#fff":t.progress>(lowerRow?0.16:0.84)?"#16191e":"#fff"} pointerEvents="none">{t.remaining}</text>}
        {t.state!=="done"&&<>
@@ -416,8 +432,8 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    </div></article>;
  })}</section>
   {__PAGES_MODE__
-    ? <footer className="guide pages-guide"><div><span className="guide-mark">1</span><span>下段の空きマスをタップ<b>新しい楕円を置く</b></span></div><div><span className="guide-mark">白</span><span>白い楕円をタップ<b>90秒計測を開始</b></span></div><div><span className="guide-mark">移</span><span>調理中の下段楕円をタップ<b>真上の空きマスへ</b></span></div><div><span className="guide-red-dot" aria-hidden="true"/><span>赤い楕円をタップ<b>完成ボックスへ</b></span></div><div><span className="guide-mark">30</span><span>完成ボックスをタップ<b>提供済み／提供不可</b></span></div><p>待機中・調理中の温度表示をタップして設定画面を開き、＋／−ボタンで調整します。焼き上がり後は温度を変更できません。温度は記録用（実測値ではありません）で、計測時間は固定90秒です。</p></footer>
-    : <footer className="guide"><div><span className="guide-mark">1</span><span>下段の空白・調理中の楕円をタップ<b>空白は配置、調理中は真上へ移動</b></span></div><div><span className="guide-arrows"><ArrowLeft size={19}/><ArrowRight size={19}/></span><span>左右の矢印をタップ<b>温度を1℃調整</b></span></div><div><span className="guide-red-dot" aria-hidden="true"/><span>赤い楕円をタップ<b>完成ボックスへ</b></span></div><div><span className="guide-mark">30</span><span>完成ボックスをタップ<b>提供/提供不可</b></span></div></footer>}
+    ? <footer className="guide pages-guide"><div><span className="guide-mark">1</span><span>下段の空きマスをタップ<b>新しい楕円を置く</b></span></div><div><span className="guide-mark">白</span><span>白い上段楕円をタップ<b>90秒計測を開始</b></span></div><div><span className="guide-mark">移</span><span>下段の楕円をタップ<b>待機中は空き上段へ、調理中も真上へ</b></span></div><div><span className="guide-red-dot" aria-hidden="true"/><span>赤い楕円をタップ<b>完成ボックスへ</b></span></div><div><span className="guide-mark">30</span><span>完成ボックスをタップ<b>提供済み／提供不可</b></span></div><p>上段に空きがない下段の待機中楕円はタップで計測を開始します。待機中・調理中の温度表示をタップして設定画面を開き、＋／−ボタンで調整します。焼き上がり後は温度を変更できません。温度は記録用（実測値ではありません）で、計測時間は固定90秒です。</p></footer>
+    : <footer className="guide"><div><span className="guide-mark">1</span><span>下段の楕円をタップ<b>空白は配置、待機中は空き上段へ、調理中は真上へ</b></span></div><div><span className="guide-arrows"><ArrowLeft size={19}/><ArrowRight size={19}/></span><span>左右の矢印をタップ<b>温度を1℃調整</b></span></div><div><span className="guide-red-dot" aria-hidden="true"/><span>赤い楕円をタップ<b>完成ボックスへ</b></span></div><div><span className="guide-mark">30</span><span>完成ボックスをタップ<b>提供/提供不可</b></span></div></footer>}
   {__PAGES_MODE__&&<Dialog open={temperatureItem!==null} onOpenChange={open=>{if(!open)setTemperatureItemId(null);}}>
     <DialogContent className="temperature-dialog"><DialogHeader><DialogTitle>温度を調整</DialogTitle><DialogDescription>{temperatureItem?`お好み焼きID ${temperatureItem.id}の設定温度です。実測センサー値ではありません。計測時間は固定90秒です。`:"温度を1℃ずつ調整します。"}</DialogDescription></DialogHeader>
       {temperatureItem&&<><p className="temperature-dialog-value">{temperatureItem.temperature}℃</p><div className="temperature-stepper"><button type="button" aria-label="温度を1℃下げる" disabled={!available||pendingIds.has(temperatureItem.id)||!temperatureCanChange} onClick={()=>perform(temperatureItem,"left")}>−1℃</button><button type="button" aria-label="温度を1℃上げる" disabled={!available||pendingIds.has(temperatureItem.id)||!temperatureCanChange} onClick={()=>perform(temperatureItem,"right")}>＋1℃</button></div></>}
