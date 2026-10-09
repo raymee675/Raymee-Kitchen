@@ -5,6 +5,8 @@ const siteSegment = typeof window === "undefined"
   : encodeURIComponent(window.location.pathname.split("/").filter(Boolean)[0] ?? "root");
 export const LOCAL_BOARD_KEY = `teppan-timer:${siteSegment}:single-phone-board:v1`;
 export const LOCAL_BOARD_SCHEMA = 6;
+export const LOCAL_BACKUP_FORMAT = "teppan-timer-pages-board";
+export const LOCAL_BACKUP_FORMAT_VERSION = 1;
 
 type StoredBoard = {
   schemaVersion: number;
@@ -15,6 +17,11 @@ type StoredBoard = {
   completionItems: CompletionItem[];
   nextPancakeOrdinal: number;
   undoHistory: UndoEntry[];
+};
+
+export type ParsedLocalBoardBackup = {
+  exportedAt: number;
+  snapshot: Snapshot;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -87,6 +94,66 @@ function decode(raw: string | null): StoredBoard {
   };
 }
 
+function toStoredBoard(snapshot: Snapshot): StoredBoard {
+  const board = normalizeBoardData({
+    items:snapshot.items,
+    records:snapshot.records ?? [],
+    completionItems:snapshot.completionItems ?? [],
+    generation:snapshot.generation,
+    nextPancakeOrdinal:snapshot.nextPancakeOrdinal,
+    undoHistory:snapshot.undoHistory ?? [],
+  });
+  return {
+    schemaVersion: LOCAL_BOARD_SCHEMA,
+    revision: snapshot.revision,
+    ...board,
+  };
+}
+
+export function createLocalBoardBackup(snapshot: Snapshot, exportedAt = Date.now()): string {
+  if (!Number.isSafeInteger(exportedAt) || exportedAt < 0) throw new Error("バックアップ日時が正しくありません。");
+  return JSON.stringify({
+    format: LOCAL_BACKUP_FORMAT,
+    formatVersion: LOCAL_BACKUP_FORMAT_VERSION,
+    exportedAt,
+    board: toStoredBoard(snapshot),
+  }, null, 2);
+}
+
+export function parseLocalBoardBackup(raw: string): ParsedLocalBoardBackup {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error("JSONバックアップを読み取れません。現在の盤面は変更していません。");
+  }
+  if (!isRecord(value) || value.format !== LOCAL_BACKUP_FORMAT || value.formatVersion !== LOCAL_BACKUP_FORMAT_VERSION
+    || !Number.isSafeInteger(value.exportedAt) || (value.exportedAt as number) < 0
+    || !Number.isFinite(new Date(value.exportedAt as number).getTime()) || !isRecord(value.board)) {
+    throw new Error("対応していないバックアップ形式です。現在の盤面は変更していません。");
+  }
+
+  try {
+    const stored = decode(JSON.stringify(value.board));
+    return {
+      exportedAt: value.exportedAt as number,
+      snapshot: {
+        revision: stored.revision,
+        generation:stored.generation,
+        items:stored.items,
+        records:stored.records,
+        completionItems:stored.completionItems,
+        nextPancakeOrdinal:stored.nextPancakeOrdinal,
+        undoHistory:stored.undoHistory,
+        serverNow: Date.now(),
+      },
+    };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "バックアップの内容が正しくありません。";
+    throw new Error(`JSONバックアップを読み込めません。${reason} 現在の盤面は変更していません。`);
+  }
+}
+
 type BoardStorage = Pick<Storage, "getItem"> & Partial<Pick<Storage, "setItem">>;
 
 export function readLocalBoard(storage: BoardStorage = window.localStorage): Snapshot {
@@ -106,18 +173,5 @@ export function readLocalBoard(storage: BoardStorage = window.localStorage): Sna
 }
 
 export function writeLocalBoard(snapshot: Snapshot, storage: Pick<Storage, "setItem"> = window.localStorage): void {
-  const board = normalizeBoardData({
-    items:snapshot.items,
-    records:snapshot.records ?? [],
-    completionItems:snapshot.completionItems ?? [],
-    generation:snapshot.generation,
-    nextPancakeOrdinal:snapshot.nextPancakeOrdinal,
-    undoHistory:snapshot.undoHistory ?? [],
-  });
-  const stored: StoredBoard = {
-    schemaVersion: LOCAL_BOARD_SCHEMA,
-    revision: snapshot.revision,
-    ...board,
-  };
-  storage.setItem(LOCAL_BOARD_KEY, JSON.stringify(stored));
+  storage.setItem(LOCAL_BOARD_KEY, JSON.stringify(toStoredBoard(snapshot)));
 }

@@ -53,3 +53,54 @@
 @media(max-width:900px) and (orientation:portrait){.topbar{height:auto;min-height:72px;padding-block:8px;flex-wrap:wrap;align-items:center;justify-content:flex-start;row-gap:8px}.brand{flex:0 0 auto}.top-actions{width:100%;min-width:0;flex:1 1 100%;justify-content:flex-start;flex-wrap:wrap;align-content:center;gap:8px}.top-actions>*{max-width:100%}.connection,.wake-indicator{white-space:nowrap}.top-actions .update-button,.top-actions .icon-button{flex-shrink:0}}
 @media(max-width:900px) and (orientation:landscape){.topbar{height:auto;min-height:56px;padding-block:6px;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 12px}.brand{flex:0 0 auto}.top-actions{width:auto;min-width:0;max-width:100%;flex:1 1 300px;justify-content:flex-end;flex-wrap:wrap;align-content:center;gap:8px}.top-actions>*{max-width:100%}.connection,.wake-indicator{white-space:nowrap}.top-actions .update-button,.top-actions .icon-button{flex-shrink:0}}
 .oval-id{font-family:ui-monospace,Consolas,monospace;font-weight:600;font-variant-numeric:tabular-nums}
+
+/* Pages-only helpers for a fixed phone; the shared PC layout keeps its current controls. */
+.pages-storage-note{margin:8px 0 0;padding:8px 11px;border:1px solid #d9e2e8;border-radius:8px;background:#f8fbfd;color:#4d5c67;font-size:12px;line-height:1.5}
+.pages-kitchen .temperature-open-button{display:grid;place-items:center;gap:1px;min-width:64px;min-height:44px;padding:3px 6px;border:1px solid #abb9c3;border-radius:8px;background:#fff;color:#27313a;font:700 12px Arial,sans-serif;font-variant-numeric:tabular-nums;cursor:pointer;pointer-events:auto;box-shadow:0 1px 2px #27313a14}
+.pages-kitchen .temperature-open-button small{font:600 8px Arial,sans-serif;color:#5e6871;line-height:1}
+.pages-kitchen .plate-label.lower{flex-direction:column-reverse}
+.pages-kitchen .temperature-open-button:disabled{opacity:.55}
+.pages-kitchen .temperature-open-button:focus-visible{outline:3px solid #d94f16;outline-offset:2px}
+.pages-completion-shortcut{position:sticky;top:calc(8px + env(safe-area-inset-top));z-index:5;display:flex;justify-content:center;margin:0 0 10px;pointer-events:none}
+.pages-completion-shortcut a{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:44px;padding:7px 14px;border:1px solid #c7d9b9;border-radius:999px;background:#f3f8ef;color:#30462a;font-size:14px;font-weight:700;text-decoration:none;box-shadow:0 3px 12px #27313a20;pointer-events:auto}
+.pages-completion-shortcut b{display:inline-grid;place-items:center;min-width:23px;height:23px;padding:0 5px;border-radius:999px;background:#dce9d2;color:#253a1d;font-variant-numeric:tabular-nums}
+.pages-kitchen .completion-box{scroll-margin-top:64px}
+.pages-guide{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:13px 18px;align-items:start}
+.pages-guide>div{align-items:flex-start;min-width:0}
+.pages-guide .guide-mark{flex:0 0 24px;width:24px;height:24px;font-size:11px}
+.pages-guide>div>span:last-child{font-size:12px}
+.pages-guide b{font-size:13px}
+.pages-guide>p{grid-column:1/-1;margin:0;text-align:center;color:#56616b;font-size:12px;line-height:1.6}
+.data-management-dialog,.temperature-dialog{max-height:calc(100dvh - 24px);overflow-y:auto;overscroll-behavior:contain}
+.data-management-actions{display:grid;gap:9px;margin-top:4px}
+.data-action-button{display:flex;align-items:center;gap:12px;width:100%;min-height:56px;padding:10px 12px;border:1px solid #cfd7dd;border-radius:10px;background:#fff;color:#27313a;text-align:left;font:inherit;cursor:pointer}
+.data-action-button>svg{flex:0 0 auto;color:#9b3e17}
+.data-action-button>span{display:grid;gap:3px;min-width:0}
+.data-action-button strong{font-size:14px}
+.data-action-button small{color:#5d6872;font-size:12px;line-height:1.4}
+.data-action-button:disabled{opacity:.55;cursor:wait}
+.backup-file-input{display:none}
+.backup-preview{margin-top:14px;padding:12px;border:1px solid #e7b4a4;border-radius:10px;background:#fff8f4;color:#4c3730}
+.backup-preview h3{margin:0 0 8px;font-size:15px}
+.backup-preview p{margin:6px 0;color:#594942;font-size:13px;line-height:1.55}
+.backup-preview>div{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;margin-top:12px}
+.backup-restore-button{min-height:44px;padding:8px 12px;border:1px solid #b93825;border-radius:8px;background:#b93825;color:#fff;font:inherit;font-size:13px;font-weight:700}
+.backup-restore-button:disabled{opacity:.55;cursor:wait}
+.temperature-dialog-value{margin:4px 0;text-align:center;color:#20252b;font-size:32px;font-weight:800;font-variant-numeric:tabular-nums}
+.temperature-stepper{display:flex;justify-content:center;gap:12px;margin:5px 0 3px}
+.temperature-stepper button{min-width:88px;min-height:52px;padding:10px 16px;border:1px solid #cfd7dd;border-radius:10px;background:#fff;color:#303840;font:inherit;font-size:17px;font-weight:800}
+.temperature-stepper button:last-child{border-color:#d94f16;background:#d94f16;color:#fff}
+.temperature-stepper button:disabled{opacity:.55;cursor:wait}
+@media(max-width:600px){
+ .pages-storage-note{margin:7px 0 0;padding:7px 9px;font-size:11px}
+ .pages-guide{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 12px;padding:18px 0 14px}
+ .pages-guide>div{gap:7px}
+ .pages-guide>div>span:last-child{font-size:11px}
+ .pages-guide b{font-size:12px}
+ .pages-guide>p{font-size:11px}
+ .pages-completion-shortcut a{min-height:44px;font-size:13px}
+ .data-management-dialog,.temperature-dialog{width:min(calc(100vw - 24px),520px);padding:18px}
+ .data-action-button{min-height:60px}
+ .backup-preview>div{justify-content:stretch}
+ .backup-preview>div button{flex:1 1 auto}
+}
