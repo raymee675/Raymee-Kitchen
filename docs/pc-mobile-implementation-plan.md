@@ -1,8 +1,8 @@
 # アーカイブ：PCをサーバーにして複数スマホから使うための実装計画
 
-**この初期計画は完了し、localhost管理画面を含むPC版専用構成へ更新されました。現在の手順・仕様は[PC版README](../cooking-app/README.md)を参照してください。**
+**2026-10-10更新：これは2026年9月28日に作成した、PCをサーバーにして複数スマートフォンから使う案の履歴資料です。現在の運用・サポート対象は固定スマートフォン1台で使う[GitHub Pages版の正本](single-phone-github-pages-architecture.md)です。PCサーバー、SQLite、端末登録等のコードはリポジトリに残っていますが、現行運用の手順やサポート対象ではありません。本文中のフェーズ・完了状況は記載時点の記録であり、現在の進行状況を表しません。**
 
-更新日：2026年9月28日。現在公開中のSites版は変更せず、**このPCで動く別の運用版**を追加している。PC版アプリのコード・SQLite保存・端末登録・起動・バックアップ機能は実装済み。利用期間は3日間なので、Windowsのモバイル ホットスポットへ参加スマホを接続し、PCのローカルアドレスから利用する方式を採用する。外部サービスやアカウント共有は不要。実際の起動方法は[READMEの短期利用手順](../cooking-app/README.md#3日間だけスマホから使う)を参照する。ホットスポットの起動とスマホ実機からの到達性は未確認。
+更新日：2026年9月28日。この時点では公開中のSites版を変更せず、**このPCで動く別の運用版**を追加する案だった。PC版アプリのコード・SQLite保存・端末登録・起動・バックアップ機能について、当時の進捗を記録している。利用期間を3日間とした場合にWindowsのモバイル ホットスポットへ参加スマホを接続する案を採用していた。ホットスポットの起動とスマホ実機からの到達性は当時未確認。本書の手順は現行の起動案内ではない。
 
 ## 目標と前提
 
@@ -29,9 +29,9 @@ Cloudflareには**PCへの接続経路**を担わせる。調理画面、API、�
 
 Cloudflare Oneの初回端末登録では、**端末ごとに許可された担当者のメールアドレス宛ての一時コード**を使用する。共有メールのログインを前提にしない。専用端末に担当者メールを使えない場合は、端末配布方法を別途設計し、同じ資格情報を全台へ複製しない。[端末登録の公式説明](https://developers.cloudflare.com/cloudflare-one/team-and-resources/devices/cloudflare-one-client/deployment/device-enrollment/)、[一時コード認証](https://developers.cloudflare.com/cloudflare-one/integrations/identity-providers/one-time-pin/)
 
-## 現在のフェーズ
+## 2026年9月28日時点のフェーズ記録
 
-**現在：フェーズ2「残りのスマホをアプリへ登録」**。フェーズ1は完了し、iPhone Safariからホットスポット経由で`/api/health`が応答しました。最初のiPhoneもアプリ登録済みです。複数台を使う直前に、次のスマホ用コードを発行し、調理画面へ登録します。Quick Tunnel、Cloudflare Zero Trust組織、スマホへの接続Agent登録は今回行いません。
+**当時のフェーズ記録：フェーズ2「残りのスマホをアプリへ登録」**。フェーズ1は完了し、iPhone Safariからホットスポット経由で`/api/health`が応答したと記録されています。最初のiPhoneもアプリ登録済みとされていました。複数台を使う直前に次のスマホ用コードを発行する計画でした。これはPC運用案の記録であり、現在の作業状況や推奨手順を示しません。
 
 | フェーズ | 作業 | 完了条件 | 状況 |
 | --- | --- | --- | --- |
@@ -84,7 +84,7 @@ Cloudflare Oneの初回端末登録では、**端末ごとに許可された担�
 
 #### フェーズ3：PCアプリを起動して接続確認
 
-1. このPCでリポジトリの`cooking-app`フォルダーを開き、ビルド済み画面があることを確認します。未ビルドなら[READMEの手順](../cooking-app/README.md)でNode.js 24.19.0以上を使って`npm ci`と`npm run build:pc`を実行します。
+1. このPCでリポジトリの`cooking-app`フォルダーを開き、ビルド済み画面があることを確認します。当時のREADMEでは、未ビルドの場合にNode.js 24.19.0以上を使って`npm ci`と`npm run build:pc`を実行する手順を案内していました。
 2. PowerShellから`scripts/run-pc-server.ps1`を実行し、Node.jsサーバーを起動します。PC自身で`http://localhost:8780/api/health`を開き、`status: ok`を確認します。
 3. 最初のスマホはWi-Fiを切り、モバイル通信を使います。Cloudflare One Agentをインストールし、フェーズ0で許可した本人のメールでチームへ登録します。Agentが接続済みになってから、`http://<IPv4>:8780/api/health`を開きます。
 4. Health応答が確認できたら、ブラウザーで`http://<IPv4>:8780/register`を開き、端末登録フォームが表示されることを確認します。
@@ -136,6 +136,6 @@ HTTPのアプリ用セッションCookieに`Secure`属性は付かない。遠�
 
 ## 今回の短期利用で用意するもの
 
-モバイル ホットスポット機能が使えるWindows PC、既存のPCインターネット接続、利用するiPhone/Android、Node.js 24.19.0以上、参加端末だけが知るWi-Fiパスワードを用意する。スマホにChatGPT・GitHub・Cloudflareのアカウントを追加する必要はない。PC版アプリは[README](../cooking-app/README.md)の手順で起動・管理する。
+当時の短期利用案では、モバイル ホットスポット機能が使えるWindows PC、既存のPCインターネット接続、利用するiPhone/Android、Node.js 24.19.0以上、参加端末だけが知るWi-Fiパスワードを用意するとしていた。スマホにChatGPT・GitHub・Cloudflareのアカウントを追加しない想定だった。PC版アプリは、当時のREADMEに記載した手順で起動・管理する計画だった。
 
 Wi-Fi Directのホットスポットアダプターやスマホからの到達性はWindowsの設定・ドライバーに依存するため、実際にオンへ切り替えて確認する。`netsh wlan show drivers`の`Hosted network supported: No`だけでは、Windows設定の「モバイル ホットスポット」機能の可否は決まりません。モバイル ホットスポットはWindows 10/11の設定からPCのインターネット接続をWi-Fi共有する機能です。[Microsoftの設定手順](https://support.microsoft.com/en-us/windows/experience/connectivity-networking/use-your-windows-device-as-a-mobile-hotspot)。ホットスポットが使えない場合は、その時点でQuick Tunnel等の外部経路へ切り替えるかを判断する。
