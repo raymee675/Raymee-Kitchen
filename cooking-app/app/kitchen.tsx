@@ -397,15 +397,15 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
        {t.state==="running"&&<rect x={cx-rx} y={cy-ry} width={rx*2} height={ry*2*t.progress} fill="#fff" clipPath={`url(#clip-${item.id})`} pointerEvents="none"/>}
        {t.state!=="blank"&&<text x={cx} y={timerY} textAnchor="middle" className="oval-number" fontSize="66" fill={t.state==="done"?"#fff":t.progress>(lowerRow?0.16:0.84)?"#16191e":"#fff"} pointerEvents="none">{t.remaining}</text>}
        {t.state!=="done"&&<>
-         <g role="button" tabIndex={0} aria-label="温度を1℃下げる" aria-disabled={!available||busy} data-item-action="left" className="oval-arrow" onKeyDown={e=>keyboard(e,item,"left")}>
-          <rect x={cx-rx} y={cy-ry-22} width={__PAGES_MODE__?"128":"96"} height={ry*2+44} fill="transparent" pointerEvents="all"/>
-           <rect x={cx-rx+9} y={cy-48} width="60" height="96" rx="18" fill="#d94f16" pointerEvents="none"/>
-           <path d={`M ${cx-rx+48} ${cy-22} l -22 22 22 22`} fill="none" stroke="#fff" strokeWidth="9" strokeLinecap="round" strokeLinejoin="round" pointerEvents="none"/>
+        <g role="button" tabIndex={0} aria-label="温度を1℃下げる" aria-disabled={!available||busy} data-item-action="left" className="oval-arrow" onKeyDown={e=>keyboard(e,item,"left")}>
+          <rect x={cx-rx-(__PAGES_MODE__?120:96)} y={cy-ry-22} width={__PAGES_MODE__?"120":"96"} height={ry*2+44} fill="transparent" pointerEvents="all"/>
+           <rect x={cx-rx-84} y={cy-48} width="60" height="96" rx="18" fill="#d94f16" pointerEvents="none"/>
+           <path d={`M ${cx-rx-45} ${cy-22} l -22 22 22 22`} fill="none" stroke="#fff" strokeWidth="9" strokeLinecap="round" strokeLinejoin="round" pointerEvents="none"/>
          </g>
          <g role="button" tabIndex={0} aria-label="温度を1℃上げる" aria-disabled={!available||busy} data-item-action="right" className="oval-arrow" onKeyDown={e=>keyboard(e,item,"right")}>
-          <rect x={cx+rx-(__PAGES_MODE__?128:96)} y={cy-ry-22} width={__PAGES_MODE__?"128":"96"} height={ry*2+44} fill="transparent" pointerEvents="all"/>
-           <rect x={cx+rx-69} y={cy-48} width="60" height="96" rx="18" fill="#d94f16" pointerEvents="none"/>
-           <path d={`M ${cx+rx-48} ${cy-22} l 22 22 -22 22`} fill="none" stroke="#fff" strokeWidth="9" strokeLinecap="round" strokeLinejoin="round" pointerEvents="none"/>
+          <rect x={cx+rx} y={cy-ry-22} width={__PAGES_MODE__?"120":"96"} height={ry*2+44} fill="transparent" pointerEvents="all"/>
+           <rect x={cx+rx+24} y={cy-48} width="60" height="96" rx="18" fill="#d94f16" pointerEvents="none"/>
+           <path d={`M ${cx+rx+45} ${cy-22} l 22 22 -22 22`} fill="none" stroke="#fff" strokeWidth="9" strokeLinecap="round" strokeLinejoin="round" pointerEvents="none"/>
          </g>
        </>}
        {busy&&<circle cx={cx+rx-20} cy={cy-ry+20} r="15" fill="#e6793e"/>}
