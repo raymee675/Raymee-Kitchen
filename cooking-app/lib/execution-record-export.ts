@@ -1,7 +1,7 @@
 import { COMPLETION_EXPIRED_REASON, LEGACY_SERVICE_OUTCOME, PLATE_DISCARD_REASON, completionStatus, isPancakeId, type ExecutionRecord } from "./kitchen-model";
 
 const headers = [
-  "お好み焼きID", "タイマー開始時刻", "回収時刻", "温度(℃)", "区間加熱秒数", "合計加熱秒数",
+  "お好み焼きID", "タイマー開始時刻", "回収時刻", "温度区間(℃・開始順)", "区間加熱秒数(開始順)", "合計加熱秒数",
   "焼き上がり時刻", "30分タイマー開始時刻", "提供時刻", "30分タイマー期限時刻", "30分タイマー停止時刻", "最終ステータス", "提供不可理由",
 ];
 
@@ -27,7 +27,7 @@ function excelTextId(value: string): string {
 }
 
 export function executionRecordsToCsv(records: readonly ExecutionRecord[], now = Date.now()): string {
-  const lines = [headers, ...records.flatMap(record => {
+  const lines = [headers, ...records.map(record => {
     const totalMilliseconds = record.segments.reduce((total, segment) => total + segment.endedAt - segment.startedAt, 0);
     const outcome = completionStatus(record, now);
     const expiredButUnconfirmed = record.serveDeadlineAt !== null && now >= record.serveDeadlineAt
@@ -44,12 +44,18 @@ export function executionRecordsToCsv(records: readonly ExecutionRecord[], now =
       ?? (record.serveTimerStartedAt !== null && (record.unavailableAt !== null || expiredButUnconfirmed)
         ? record.serveDeadlineAt
         : null);
-    return record.segments.map(segment => [
+    const temperatures = record.segments.map(segment =>
+      segment.temperature === null ? "温度不明" : String(segment.temperature),
+    ).join(" | ");
+    const segmentSeconds = record.segments.map(segment =>
+      seconds(segment.endedAt - segment.startedAt),
+    ).join(" | ");
+    return [
       excelTextId(record.id),
       localTimestamp(record.startedAt),
       localTimestamp(record.collectedAt),
-      segment.temperature === null ? "温度不明" : segment.temperature,
-      seconds(segment.endedAt - segment.startedAt),
+      temperatures,
+      segmentSeconds,
       seconds(totalMilliseconds),
       record.cookCompletedAt === null || outcome === "legacy" ? "" : localTimestamp(record.cookCompletedAt),
       record.serveTimerStartedAt === null ? "" : localTimestamp(record.serveTimerStartedAt),
@@ -58,7 +64,7 @@ export function executionRecordsToCsv(records: readonly ExecutionRecord[], now =
       stoppedAt === null ? "" : localTimestamp(stoppedAt),
       finalStatus,
       unavailableReason,
-    ]);
+    ];
   })].map(line => line.map(csvField).join(",")).join("\r\n");
   return `\uFEFF${lines}\r\n`;
 }
