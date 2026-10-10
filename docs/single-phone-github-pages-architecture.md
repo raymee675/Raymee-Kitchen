@@ -147,7 +147,7 @@ PC legacyのSQLiteに調理中データが残っている場合、Pages版はそ
 
 - [デプロイ修復記録](github-pages-deployment-plan.md)によると、Actionsの再実行 attempt 2 が成功し、`https://raymee675.github.io/Raymee-Kitchen/` はHTTP 200で「鉄板タイマー」のHTMLを返した。
 - 同じ確認で、画面内の`navigator.locks.request`が`ifAvailable`と`signal`の同時指定を拒否して操作が停止する実行時エラーが報告された。修正commit `67de70e`は後日mainに反映された。
-- 2026-10-09のActions run 13成功とHTTP 200確認は、上の「現行運用の範囲と公開状況」に記載した。固定スマートフォンの実運用確認とは区別する。
+- 2026-10-09のActions run 13は成功し、公開URLがHTTP 200を返すことを確認した。これはページの到達性確認であり、固定スマートフォンの実運用確認とは区別する。より新しい2026-10-10の公開確認は上の「現行運用の範囲と公開状況」に記載した。
 
 ### 最新Pages公開記録（2026-10-10）
 
