@@ -310,7 +310,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
       <DialogHeader><DialogTitle>データ管理</DialogTitle><DialogDescription>{kitchen.recoveryAvailable?"保存データを読み込めません。この画面が編集ロックを保持し、保存領域へ書き込める間だけ、検証済みJSONバックアップから復旧できます。":"データはこのスマートフォンのブラウザー内に保存されます。JSONバックアップは端末のダウンロード先に保存し、必要に応じて別の場所にも保管してください。"}</DialogDescription></DialogHeader>
       <div className="data-management-actions">
         <button type="button" className="data-action-button" disabled={!snapshot||!available} onClick={exportBoardBackup}><Database size={18}/><span><strong>盤面バックアップを保存</strong><small>盤面・タイマー・完成ボックス・実行記録・次のIDをJSONに保存</small></span></button>
-        <button type="button" className="data-action-button" disabled={!snapshot||!available||records.length===0} onClick={exportRecords}><Download size={18}/><span><strong>実行記録CSVを書き出す</strong><small>完了した記録のみ。盤面の復元には使えません</small></span></button>
+        <button type="button" className="data-action-button" disabled={!snapshot||!available||records.length===0} onClick={exportRecords}><Download size={18}/><span><strong>実行記録CSVを書き出す</strong><small>1記録1行。温度と区間秒数は開始順に対応。盤面の復元には使えません</small></span></button>
         <input ref={backupFileInput} className="backup-file-input" type="file" accept=".json,application/json" aria-label="JSONバックアップファイル" onChange={selectBackupFile}/>
         <button type="button" className="data-action-button" disabled={!canRestoreBoard||backupReading||pendingIds.size>0} onClick={()=>backupFileInput.current?.click()}><Download size={18}/><span><strong>{backupReading?"バックアップを確認中…":kitchen.recoveryAvailable?"JSONバックアップを選んで復旧":"JSONバックアップを選んで復元"}</strong><small>選択後に内容を確認してから、現在の保存データを置き換えます</small></span></button>
       </div>
@@ -329,12 +329,12 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
   <Dialog open={help} onOpenChange={setHelp}><DialogTrigger asChild><button className="icon-button" aria-label="使い方"><CircleHelp size={21}/></button></DialogTrigger><DialogContent className="help-dialog"><DialogHeader><DialogTitle>鉄板タイマーの使い方</DialogTitle><DialogDescription>{__PAGES_MODE__?"調理状態は、このスマートフォンのこのブラウザー内だけに保存されます。":"同じ画面を開いたスマホで、調理の状態を共有できます。"}</DialogDescription></DialogHeader>
   <ol className="help-list"><li>鉄板は縦2行・横3列の6マスです。新しい楕円は下段の空きマスをタップして配置します。上段は、下段から移動した楕円だけを置ける移動先専用です。</li><li>下段の待機中の楕円は、同じ鉄板・同じ列の上段が空いていればタップで上段へ移動します。上段が埋まっている場合は計測を始めます。移動できない配置の場合は元の場所に残り、理由を表示します。上段の待機中の楕円をタップすると固定90秒の計測が始まります。調理中の下段の楕円をタップすると、同じ鉄板・同じ列の真上にある空き上段マスへ移動します。移動先が使用中、または鉄板が過密の場合は移動せず、理由を表示します。上段の楕円は移動できません。</li><li>楕円の左右にある矢印をタップすると、待機中・計測中の温度を1℃ずつ変更できます。焼き上がり後は変更できません。初期値は96℃です。この温度は設定・記録用で、センサーの実測値ではありません。計測時間は常に90秒です。</li><li>残り0秒で楕円が赤くなります。赤い楕円をタップすると完成ボックスへ移り、30分の保管タイマーが始まります。期限前に完成ボックスをタップすると提供済みになり、期限後は「提供不可」として履歴に残して取り出せます。</li></ol>
   <p className="help-note">「操作を取り消す」では直近50件までの楕円配置・鉄板上の移動を操作順に戻せます。タイマー開始、温度変更、完成ボックスへの移動、提供・提供不可の確定を行うと、それ以前の取り消し履歴は消えます。過密な旧データは位置を保って表示し、新規配置とその鉄板にある楕円の移動はできません。</p>
+  <p className="help-note">実行記録CSVはお好み焼きIDごとに1行です。「温度区間(℃・開始順)」と「区間加熱秒数(開始順)」は開始順のリストで、各位置が対応します。区切りは「 | 」で、温度不明の区間も対応する秒数と同じ位置に残ります。合計秒数と焼き上がり・保管・提供の時刻、最終ステータスも記録ごとに1回出力します。</p>
   {__PAGES_MODE__?<>
     <p className="help-note">調理状態はこのスマートフォンのこのブラウザー内だけに保存され、PC版や別ブラウザーとは共有されません。サイトデータの削除、ブラウザー変更、端末交換で消えることがあります。定期的に「データ管理」からJSONバックアップを保存してください。CSVは完了した実行記録だけの書き出しで、盤面復元には使えません。</p>
     <p className="help-note">調理中は画面を表示してご利用ください。画面ロック中にタイマー通知やアラームを鳴らす保証はありません。新しい版の案内が表示されたら、調理を終えてから「新しい版に更新」を押してください。</p>
   </>:<>
     <p className="help-note">未接続の間は表示のみとなります。パソコンではTabで楕円を選択、Enterで計測開始・下段の調理中楕円の上段移動・焼き上がりの取り出し、左右キーで温度を1℃調整できます。</p>
-    <p className="help-note">記録は「記録を書き出す」からExcelで開けるCSVにできます。温度ごとの加熱秒数に加え、焼き上がり・保管・提供の時刻と最終ステータスを出力します。</p>
     <p className="help-note">PC版は通常のブラウザーで利用します。画面ロック中の通知はありません。</p>
   </>}
   <button className="help-done" onClick={()=>setHelp(false)}>わかりました</button></DialogContent></Dialog>

@@ -22,6 +22,7 @@
 
 - [完成ボックス計画](completed-box-plan.md)
 - [実行記録の書き出し計画](execution-record-export-plan.md)
+- [実行記録CSVを1 ID 1行にする計画](execution-record-one-row-plan.md)
 - [鉄板配置グリッド計画](plate-grid-layout-plan.md)
 - [楕円ラベルの読みやすさ計画](oval-label-readability-plan.md)
 - [下段限定の新規配置計画](oval-lower-row-placement-plan.md)
