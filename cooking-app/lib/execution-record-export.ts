@@ -1,7 +1,7 @@
 import { COMPLETION_EXPIRED_REASON, LEGACY_SERVICE_OUTCOME, PLATE_DISCARD_REASON, completionStatus, isPancakeId, type ExecutionRecord } from "./kitchen-model";
 
 const headers = [
-  "お好み焼きID", "タイマー開始時刻", "回収時刻", "温度区間(℃・開始順)", "区間加熱秒数(開始順)", "合計加熱秒数",
+  "お好み焼きID", "鉄板投入時刻", "下段→上段移動時刻", "タイマー開始時刻", "回収時刻", "温度区間(℃・開始順)", "区間加熱秒数(開始順)", "合計加熱秒数",
   "焼き上がり時刻", "30分タイマー開始時刻", "提供時刻", "30分タイマー期限時刻", "30分タイマー停止時刻", "最終ステータス", "提供不可理由",
 ];
 
@@ -27,7 +27,8 @@ function excelTextId(value: string): string {
 }
 
 export function executionRecordsToCsv(records: readonly ExecutionRecord[], now = Date.now()): string {
-  const lines = [headers, ...records.map(record => {
+  const orderedRecords = [...records].sort((a, b) => a.creationOrdinal - b.creationOrdinal);
+  const lines = [headers, ...orderedRecords.map(record => {
     const totalMilliseconds = record.segments.reduce((total, segment) => total + segment.endedAt - segment.startedAt, 0);
     const outcome = completionStatus(record, now);
     const expiredButUnconfirmed = record.serveDeadlineAt !== null && now >= record.serveDeadlineAt
@@ -52,6 +53,8 @@ export function executionRecordsToCsv(records: readonly ExecutionRecord[], now =
     ).join(" | ");
     return [
       excelTextId(record.id),
+      record.griddlePlacedAt === null ? "" : localTimestamp(record.griddlePlacedAt),
+      record.movedToUpperAt === null ? "" : localTimestamp(record.movedToUpperAt),
       localTimestamp(record.startedAt),
       localTimestamp(record.collectedAt),
       temperatures,

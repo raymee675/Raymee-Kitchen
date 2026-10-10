@@ -74,7 +74,10 @@ export function useKitchen() {
     const currentState = state.current;
     if (!currentState) throw new Error("最新の盤面を読み込んでから操作してください。");
     const request = {...command, expectedGeneration:command.expectedGeneration ?? currentState.generation} as Command;
-    const pendingKey = request.type === "create" || request.type === "undo" || request.type === "reset" ? request.operationId : request.id;
+    const pendingKey = request.type === "create" || request.type === "undo" || request.type === "reset"
+      || request.type === "doughStart" || request.type === "doughReset" || request.type === "doughDiscardAndStart"
+      ? request.operationId
+      : request.id;
     if (pending.current.has(pendingKey)) throw new Error("このお好み焼きは操作を送信中です。");
     pending.current.add(pendingKey);
     setPendingIds(new Set(pending.current));

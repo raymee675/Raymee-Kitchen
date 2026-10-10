@@ -1,6 +1,6 @@
 # ドキュメント索引
 
-更新日：2026-10-10
+更新日：2026-10-11
 
 この一覧は各資料の役割と入口を示します。現行の運用・サポート範囲を決める資料は[固定1台のスマートフォンで使うGitHub Pages構成](single-phone-github-pages-architecture.md)だけです。個別機能の計画・実装記録は、その機能の要件や記録日当時の状態を示すもので、ホスティング方式や運用手順を変更しません。各計画の進捗・未決事項は、それぞれの資料内の記載を参照してください。
 
@@ -22,6 +22,7 @@
 
 - [完成ボックス計画](completed-box-plan.md)
 - [実行記録の書き出し計画](execution-record-export-plan.md)
+- [実行記録CSVへの鉄板イベント時刻追加計画](execution-record-event-times-plan.md)
 - [実行記録CSVを1 ID 1行にする計画](execution-record-one-row-plan.md)
 - [鉄板配置グリッド計画](plate-grid-layout-plan.md)
 - [楕円ラベルの読みやすさ計画](oval-label-readability-plan.md)
@@ -36,6 +37,7 @@
 - [温度・固定90秒・横画面対応計画](temperature-and-landscape-plan.md)
 - [操作取り消しと盤外操作の計画](undo-action-plan.md)
 - [配置Undo時のID再利用計画](undo-id-reuse-plan.md)
+- [鉄板外への長押しドラッグ削除計画](pancake-outside-delete-plan.md)
 
 ## 過去の構成案・検証記録
 

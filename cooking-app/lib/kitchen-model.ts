@@ -15,6 +15,8 @@ export const GRID_CELLS: readonly GridCell[] = Array.from({length:GRID_CELLS_PER
 });
 export const TIMER_DURATION = 90;
 export const COMPLETION_BOX_DURATION = 30 * 60;
+export const DOUGH_BATCH_SIZE = 24;
+export const DOUGH_BATCH_DURATION = 20 * 60 * 1000;
 export const DEFAULT_TEMPERATURE = 96;
 export const LEGACY_SERVICE_OUTCOME = "導入前・判定不可";
 export const PLATE_DISCARD_REASON = "盤外破棄";
@@ -22,9 +24,13 @@ export const COMPLETION_EXPIRED_REASON = "30分経過";
 
 export interface Pancake {
   id: string;
+  entityKey: string;
+  creationOrdinal: number;
   plate: 1 | 2;
   x: number;
   y: number;
+  griddlePlacedAt: number | null;
+  movedToUpperAt: number | null;
   // Kept in the stored/API shape for older clients, but canonicalized to 90.
   duration: number;
   temperature: number;
@@ -38,6 +44,10 @@ export interface HeatingSegment { temperature: number | null; startedAt: number;
 export interface ExecutionRecordSegment { temperature: number | null; startedAt: number; endedAt: number }
 export interface ExecutionRecord {
   id: string;
+  entityKey: string;
+  creationOrdinal: number;
+  griddlePlacedAt: number | null;
+  movedToUpperAt: number | null;
   startedAt: number;
   collectedAt: number;
   segments: ExecutionRecordSegment[];
@@ -48,23 +58,37 @@ export interface ExecutionRecord {
   unavailableAt: number | null;
   unavailableReason: string | null;
 }
-export interface CompletionItem { id: string; version: number }
-export type StoredPancake = Omit<Pancake, "temperature" | "segments"> & { temperature?: number; segments?: HeatingSegment[] };
-type OverflowRestorePosition = { id:string; plate:1|2; x:number; y:number };
+export interface CompletionItem { id: string; entityKey: string; creationOrdinal: number; version: number }
+export interface DoughBatchState {
+  batchId: string;
+  firstPancakeOrdinal: number;
+  startedAt: number;
+  deadlineAt: number;
+  placedEntityKeys: string[];
+  completedAt: number | null;
+}
+export type StoredPancake = Omit<Pancake, "temperature" | "segments" | "entityKey" | "creationOrdinal" | "griddlePlacedAt" | "movedToUpperAt"> & { temperature?: number; segments?: HeatingSegment[]; entityKey?:string; creationOrdinal?:number; griddlePlacedAt?:number|null; movedToUpperAt?:number|null };
+type OverflowRestorePosition = { id:string; entityKey:string; creationOrdinal:number; plate:1|2; x:number; y:number };
 type OverflowPlateRestore = { positions:Array<OverflowRestorePosition>; legacyPlate?:1|2 };
 export type UndoEntry =
-  | { operationId: string; type: "create"; id: string }
-  | { operationId: string; type: "move"; id: string; from: Pick<Pancake, "plate" | "x" | "y">; overflowPlateRestore?: OverflowPlateRestore }
-  | { operationId: string; type: "delete"; id: string; pancake: Pancake; discardRecordId: string | null };
+  | { operationId: string; type: "create"; id: string; entityKey:string; creationOrdinal:number }
+  | { operationId: string; type: "move"; id: string; entityKey:string; creationOrdinal:number; from: Pick<Pancake, "plate" | "x" | "y">; overflowPlateRestore?: OverflowPlateRestore }
+  | { operationId: string; type: "delete"; id: string; entityKey:string; creationOrdinal:number; pancake: Pancake; discardRecordEntityKey:string|null };
 export const MAX_UNDO_HISTORY = 50;
-export interface Snapshot { revision: number; generation: number; items: Pancake[]; records: ExecutionRecord[]; completionItems: CompletionItem[]; nextPancakeOrdinal: number; undoHistory: UndoEntry[]; serverNow: number; serverReceivedAt?: number }
+// doughBatch is present in the Pages local snapshot. It remains optional for
+// legacy server snapshots, which are outside the current supported runtime.
+export interface Snapshot { revision: number; generation: number; items: Pancake[]; records: ExecutionRecord[]; completionItems: CompletionItem[]; nextPancakeOrdinal: number; nextCreationOrdinal:number; undoHistory: UndoEntry[]; doughBatch?: DoughBatchState | null; serverNow: number; serverReceivedAt?: number }
 export function clockSample(serverNow:number, serverReceivedAt:number, elapsed:number) {
   const networkRtt = Math.max(0, elapsed - Math.max(0, serverNow - serverReceivedAt));
   return {networkRtt, estimatedNow:serverNow + networkRtt / 2};
 }
 export type Command =
-  | { operationId: string; expectedGeneration?: number; type: "create"; id?: string; plate: 1 | 2; x: number; y: number }
+  | { operationId: string; expectedGeneration?: number; type: "create"; id?: string; plate: 1 | 2; x: number; y: number; expectedDoughBatchId?: string | null; expectedNextPancakeOrdinal?: number }
+  | { operationId: string; expectedGeneration?: number; type: "doughStart"; expectedDoughBatchId: null; expectedNextPancakeOrdinal: number }
+  | { operationId: string; expectedGeneration?: number; type: "doughReset"; expectedDoughBatchId: string; expectedNextPancakeOrdinal: number }
+  | { operationId: string; expectedGeneration?: number; type: "doughDiscardAndStart"; expectedDoughBatchId: string; expectedNextPancakeOrdinal: number }
   | { operationId: string; expectedGeneration?: number; type: "start" | "remove"; id: string; expectedVersion: number }
+  | { operationId: string; expectedGeneration:number; type:"delete"; id:string; expectedVersion:number }
   | { operationId: string; expectedGeneration?: number; type: "move"; id: string; expectedVersion: number; plate: 1 | 2; x: number; y: number }
   | { operationId: string; expectedGeneration?: number; type: "adjust"; id: string; expectedVersion: number; delta: -1 | 1 }
   | { operationId: string; expectedGeneration?: number; type: "undo"; expectedUndoOperationId: string }
@@ -77,12 +101,106 @@ const SEQUENTIAL_ID_RX = /^([1-8])-(?:([1-9])|(1[0-9])|(2[0-4]))$/;
 export const MAX_PANCAKE_IDS = 8 * 24;
 export const INITIAL_PANCAKE_ORDINAL = 1;
 
+export function nextDoughBatchFirstOrdinal(nextPancakeOrdinal: number): number {
+  if (!Number.isSafeInteger(nextPancakeOrdinal) || nextPancakeOrdinal < INITIAL_PANCAKE_ORDINAL || nextPancakeOrdinal > MAX_PANCAKE_IDS + 1) {
+    throw new KitchenError("invalid_state", "お好み焼きIDの次番号を確認できません。");
+  }
+  return nextPancakeOrdinal + ((DOUGH_BATCH_SIZE - ((nextPancakeOrdinal - INITIAL_PANCAKE_ORDINAL) % DOUGH_BATCH_SIZE)) % DOUGH_BATCH_SIZE);
+}
+
+export function doughBatchStatus(batch: DoughBatchState | null | undefined, now: number): "not_started" | "active" | "expired" | "complete" {
+  if (!batch) return "not_started";
+  if (batch.completedAt !== null) return "complete";
+  return now <= batch.deadlineAt ? "active" : "expired";
+}
+
+function normalizeDoughBatch(value: unknown, nextPancakeOrdinal: number): DoughBatchState | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("保存データの生地タイマーが正しくありません。");
+  const candidate = value as Record<string, unknown>;
+  const first = candidate.firstPancakeOrdinal;
+  const startedAt = candidate.startedAt;
+  const deadlineAt = candidate.deadlineAt;
+  const rawPlacedKeys = candidate.placedEntityKeys;
+  const rawPlacedIds = candidate.placedIds;
+  const completedAt = candidate.completedAt;
+  if (!isUuidV4(candidate.batchId)
+    || !Number.isSafeInteger(first) || (first as number) < 1 || (first as number) > MAX_PANCAKE_IDS - DOUGH_BATCH_SIZE + 1
+    || ((first as number) - INITIAL_PANCAKE_ORDINAL) % DOUGH_BATCH_SIZE !== 0
+    || !Number.isSafeInteger(startedAt) || (startedAt as number) < 0
+    || !Number.isSafeInteger(deadlineAt) || deadlineAt !== (startedAt as number) + DOUGH_BATCH_DURATION
+    || !(Array.isArray(rawPlacedKeys) || Array.isArray(rawPlacedIds))
+    || (Array.isArray(rawPlacedKeys) && Array.isArray(rawPlacedIds))
+    || (Array.isArray(rawPlacedKeys) ? rawPlacedKeys.length : (rawPlacedIds as unknown[]).length) > DOUGH_BATCH_SIZE
+    || !(completedAt === null || (Number.isSafeInteger(completedAt) && (completedAt as number) >= (startedAt as number) && (completedAt as number) <= (deadlineAt as number)))
+    || ((Array.isArray(rawPlacedKeys) ? rawPlacedKeys.length : (rawPlacedIds as unknown[]).length) === DOUGH_BATCH_SIZE) !== (completedAt !== null)) {
+    throw new Error("保存データの生地タイマーが正しくありません。");
+  }
+  const placedValues = (Array.isArray(rawPlacedKeys) ? rawPlacedKeys : rawPlacedIds) as unknown[];
+  const normalizedKeys: string[] = [];
+  const seen = new Set<string>();
+  placedValues.forEach((value: unknown, index: number) => {
+    const isLegacyId = Array.isArray(rawPlacedIds);
+    const key = isLegacyId && typeof value === "string" && isPancakeId(value)
+      ? legacyEntityKey(value)
+      : value;
+    if ((isLegacyId && pancakeOrdinalForId(value as string) !== (first as number) + index)
+      || !isEntityKey(key) || seen.has(key)) {
+      throw new Error("保存データの生地配置履歴が正しくありません。");
+    }
+    seen.add(key);
+    normalizedKeys.push(key);
+  });
+  if (nextPancakeOrdinal !== (first as number) + normalizedKeys.length) {
+    throw new Error("保存データの生地配置数と次IDが一致しません。");
+  }
+  return {
+    batchId:candidate.batchId,
+    firstPancakeOrdinal:first as number,
+    startedAt:startedAt as number,
+    deadlineAt:deadlineAt as number,
+    placedEntityKeys:normalizedKeys,
+    completedAt:completedAt as number | null,
+  };
+}
+
 export function isPancakeId(value: unknown): value is string {
   return typeof value === "string" && (UUID_V4_RX.test(value) || SEQUENTIAL_ID_RX.test(value));
 }
 
 export function isUuidV4(value: unknown): value is string {
   return typeof value === "string" && UUID_V4_RX.test(value);
+}
+
+function legacyEntityKey(id:string):string {
+  if (!isPancakeId(id)) throw new Error("保存データのお好み焼きIDが正しくありません。");
+  return `legacy:${encodeURIComponent(id)}`;
+}
+
+export function isEntityKey(value:unknown):value is string {
+  if (isUuidV4(value)) return true;
+  if (typeof value !== "string" || !value.startsWith("legacy:")) return false;
+  try {
+    const id = decodeURIComponent(value.slice("legacy:".length));
+    return isPancakeId(id) && legacyEntityKey(id) === value;
+  } catch {
+    return false;
+  }
+}
+
+function entityKeyFor(id:string, candidate:unknown):string {
+  if (candidate === undefined) return legacyEntityKey(id);
+  if (!isEntityKey(candidate)) throw new Error("保存データのお好み焼き内部IDが正しくありません。");
+  return candidate;
+}
+
+function creationOrdinalFor(id:string, candidate:unknown):number {
+  if (candidate === undefined) return pancakeOrdinalForId(id) ?? 0;
+  if (!Number.isSafeInteger(candidate) || (candidate as number) < 1) {
+    throw new Error("保存データのお好み焼き作成順が正しくありません。");
+  }
+  return candidate as number;
 }
 
 export function pancakeIdForOrdinal(ordinal: number): string {
@@ -106,6 +224,11 @@ export function normalizePancake(item: StoredPancake): Pancake {
   if (!isPancakeId(item.id)) throw new Error("保存データのお好み焼きIDが正しくありません。");
   if ((item.plate !== 1 && item.plate !== 2) || !savedPositionIsValid(item.x, item.y)) {
     throw new Error("保存データのお好み焼き位置が正しくありません。");
+  }
+  const validEventTime = (value: unknown) => value === undefined || value === null
+    || (typeof value === "number" && Number.isFinite(value) && value >= 0);
+  if (!validEventTime(item.griddlePlacedAt) || !validEventTime(item.movedToUpperAt)) {
+    throw new Error("保存データの鉄板イベント時刻が正しくありません。");
   }
   let segments: HeatingSegment[];
   if (item.segments === undefined) {
@@ -134,7 +257,11 @@ export function normalizePancake(item: StoredPancake): Pancake {
   }
   return {
     ...item,
+    entityKey:entityKeyFor(item.id, item.entityKey),
+    creationOrdinal:creationOrdinalFor(item.id, item.creationOrdinal),
     duration: TIMER_DURATION,
+    griddlePlacedAt:item.griddlePlacedAt ?? null,
+    movedToUpperAt:item.movedToUpperAt ?? null,
     temperature: item.temperature !== undefined && Number.isSafeInteger(item.temperature)
       ? item.temperature
       : DEFAULT_TEMPERATURE,
@@ -149,13 +276,24 @@ export function normalizePancakes(items: readonly StoredPancake[]): Pancake[] {
 export function normalizeExecutionRecords(value: unknown): ExecutionRecord[] {
   if (!Array.isArray(value)) throw new Error("保存データの実行記録が正しくありません。");
   const ids = new Set<string>();
-  return value.map(record => {
+    return value.map(record => {
     if (!record || typeof record !== "object" || Array.isArray(record)) throw new Error("保存データの実行記録が正しくありません。");
     const candidate = record as Record<string, unknown>;
     if (!isPancakeId(candidate.id) || !Number.isFinite(candidate.startedAt) || !Number.isFinite(candidate.collectedAt)
       || (candidate.collectedAt as number) < (candidate.startedAt as number) || !Array.isArray(candidate.segments) || candidate.segments.length === 0) {
       throw new Error("保存データの実行記録が正しくありません。");
     }
+    const entityKey = entityKeyFor(candidate.id, candidate.entityKey);
+    const creationOrdinal = creationOrdinalFor(candidate.id, candidate.creationOrdinal);
+    const nullableEventTime = (value: unknown) => value === undefined || value === null
+      || (typeof value === "number" && Number.isFinite(value) && value >= 0);
+    if (!nullableEventTime(candidate.griddlePlacedAt) || !nullableEventTime(candidate.movedToUpperAt)) {
+      throw new Error("保存データの鉄板イベント時刻が正しくありません。");
+    }
+    const eventTimes = {
+      griddlePlacedAt:candidate.griddlePlacedAt === undefined ? null : candidate.griddlePlacedAt as number | null,
+      movedToUpperAt:candidate.movedToUpperAt === undefined ? null : candidate.movedToUpperAt as number | null,
+    };
     const segments: ExecutionRecordSegment[] = candidate.segments.map((raw: unknown) => {
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("保存データの実行区間が正しくありません。");
       const segment = raw as Record<string, unknown>;
@@ -175,6 +313,9 @@ export function normalizeExecutionRecords(value: unknown): ExecutionRecord[] {
     if (!hasServiceData) {
       return {
         id:candidate.id,
+        entityKey,
+        creationOrdinal,
+        ...eventTimes,
         startedAt:candidate.startedAt as number,
         collectedAt:candidate.collectedAt as number,
         segments,
@@ -211,7 +352,7 @@ export function normalizeExecutionRecords(value: unknown): ExecutionRecord[] {
         || service.serveDeadlineAt !== null || service.servedAt !== null || service.unavailableAt !== null) {
         throw new Error("保存データの旧提供記録が正しくありません。");
       }
-      return {id:candidate.id, startedAt:candidate.startedAt as number, collectedAt:candidate.collectedAt as number, segments, ...service};
+      return {id:candidate.id, entityKey, creationOrdinal, ...eventTimes, startedAt:candidate.startedAt as number, collectedAt:candidate.collectedAt as number, segments, ...service};
     }
     if (service.cookCompletedAt !== (candidate.startedAt as number) + TIMER_DURATION * 1000) {
       throw new Error("保存データの焼き上がり時刻が正しくありません。");
@@ -240,25 +381,29 @@ export function normalizeExecutionRecords(value: unknown): ExecutionRecord[] {
         throw new Error("保存データの提供不可理由が正しくありません。");
       }
     }
-    return {id:candidate.id, startedAt:candidate.startedAt as number, collectedAt:candidate.collectedAt as number, segments, ...service};
+      return {id:candidate.id, entityKey, creationOrdinal, ...eventTimes, startedAt:candidate.startedAt as number, collectedAt:candidate.collectedAt as number, segments, ...service};
   });
 }
 
 export function normalizeCompletionItems(value: unknown, records: readonly ExecutionRecord[]): CompletionItem[] {
   if (!Array.isArray(value)) throw new Error("保存データの完成ボックスが正しくありません。");
-  const ids = new Set<string>();
-  const recordById = new Map(records.map(record => [record.id, record]));
+  const entityKeys = new Set<string>();
+  const recordByKey = new Map(records.map(record => [record.entityKey, record]));
   return value.map(item => {
     if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("保存データの完成ボックスが正しくありません。");
     const candidate = item as Record<string, unknown>;
-    const record = typeof candidate.id === "string" ? recordById.get(candidate.id) : undefined;
-    if (typeof candidate.id !== "string" || !Number.isSafeInteger(candidate.version) || (candidate.version as number) < 1
-      || ids.has(candidate.id) || !record || record.serveTimerStartedAt === null
+    if (typeof candidate.id !== "string" || !isPancakeId(candidate.id)) throw new Error("保存データの完成ボックス項目が正しくありません。");
+    const entityKey = entityKeyFor(candidate.id, candidate.entityKey);
+    const record = recordByKey.get(entityKey);
+    const creationOrdinal = record?.creationOrdinal ?? creationOrdinalFor(candidate.id, candidate.creationOrdinal);
+    if (!Number.isSafeInteger(candidate.version) || (candidate.version as number) < 1
+      || entityKeys.has(entityKey) || !record || (candidate.creationOrdinal !== undefined && creationOrdinal !== candidate.creationOrdinal)
+      || record.serveTimerStartedAt === null
       || record.servedAt !== null || record.unavailableAt !== null || record.unavailableReason !== null) {
       throw new Error("保存データの完成ボックス項目が正しくありません。");
     }
-    ids.add(candidate.id);
-    return {id:candidate.id, version:candidate.version as number};
+    entityKeys.add(entityKey);
+    return {id:candidate.id, entityKey, creationOrdinal, version:candidate.version as number};
   });
 }
 
@@ -268,7 +413,202 @@ export interface NormalizedBoardData {
   records: ExecutionRecord[];
   completionItems: CompletionItem[];
   nextPancakeOrdinal: number;
+  nextCreationOrdinal:number;
   undoHistory: UndoEntry[];
+  doughBatch?: DoughBatchState | null;
+}
+
+function assignEntityOrdinals(
+  items: Pancake[],
+  records: ExecutionRecord[],
+  completionItems: CompletionItem[],
+  undoHistory: UndoEntry[],
+  requestedNextOrdinal: unknown,
+  nextPancakeOrdinal: number,
+) {
+  const byKey = new Map<string, {id:string; ordinal:number}>();
+  const register = (entityKey:string, id:string, ordinal:number) => {
+    const current = byKey.get(entityKey);
+    if (!current) {
+      byKey.set(entityKey, {id, ordinal});
+      return;
+    }
+    if (current.ordinal > 0 && ordinal > 0 && current.ordinal !== ordinal) {
+      throw new Error("保存データで同じお好み焼きの作成順が一致しません。");
+    }
+    if (current.ordinal === 0 && ordinal > 0) current.ordinal = ordinal;
+  };
+  for (const record of records) register(record.entityKey, record.id, record.creationOrdinal);
+  for (const item of items) register(item.entityKey, item.id, item.creationOrdinal);
+  for (const item of completionItems) register(item.entityKey, item.id, item.creationOrdinal);
+  for (const entry of undoHistory) {
+    register(entry.entityKey, entry.id, entry.creationOrdinal);
+    if (entry.type === "delete") register(entry.pancake.entityKey, entry.pancake.id, entry.pancake.creationOrdinal);
+    if (entry.type === "move" && entry.overflowPlateRestore) {
+      for (const position of entry.overflowPlateRestore.positions) register(position.entityKey, position.id, position.creationOrdinal);
+    }
+  }
+
+  const usedOrdinals = new Map<number, string>();
+  for (const [entityKey, entity] of byKey) {
+    if (entity.ordinal <= 0) continue;
+    const prior = usedOrdinals.get(entity.ordinal);
+    if (prior && prior !== entityKey) throw new Error("保存データに重複したお好み焼き作成順があります。");
+    usedOrdinals.set(entity.ordinal, entityKey);
+  }
+  let greatestOrdinal = Math.max(0, ...usedOrdinals.keys());
+  for (const [entityKey, entity] of byKey) {
+    if (entity.ordinal > 0) continue;
+    greatestOrdinal += 1;
+    if (!Number.isSafeInteger(greatestOrdinal)) throw new Error("お好み焼き作成順が上限に達しています。");
+    entity.ordinal = greatestOrdinal;
+    usedOrdinals.set(greatestOrdinal, entityKey);
+  }
+  if (requestedNextOrdinal !== undefined
+    && (!Number.isSafeInteger(requestedNextOrdinal) || (requestedNextOrdinal as number) < 1 || (requestedNextOrdinal as number) <= greatestOrdinal)) {
+    throw new Error("保存データのお好み焼き作成順カウンターが正しくありません。");
+  }
+  const nextCreationOrdinal = requestedNextOrdinal === undefined
+    ? Math.max(greatestOrdinal + 1, nextPancakeOrdinal)
+    : requestedNextOrdinal as number;
+  if (!Number.isSafeInteger(nextCreationOrdinal) || nextCreationOrdinal < 1) {
+    throw new Error("保存データのお好み焼き作成順カウンターが正しくありません。");
+  }
+  const withOrdinal = <T extends {entityKey:string; creationOrdinal:number}>(entity:T):T => {
+    const ordinal = byKey.get(entity.entityKey)?.ordinal;
+    if (!ordinal) throw new Error("保存データのお好み焼き作成順を解決できません。");
+    return {...entity, creationOrdinal:ordinal};
+  };
+  const normalizedItems = items.map(withOrdinal);
+  const normalizedRecords = records.map(withOrdinal);
+  const normalizedCompletion = completionItems.map(withOrdinal);
+  const normalizedUndo = undoHistory.map(entry => {
+    const common = withOrdinal(entry);
+    if (entry.type === "delete") return {...common, pancake:withOrdinal(entry.pancake)};
+    return common;
+  });
+  return {
+    items:normalizedItems,
+    records:normalizedRecords,
+    completionItems:normalizedCompletion,
+    undoHistory:normalizedUndo,
+    nextCreationOrdinal,
+  };
+}
+
+function relabelEntities(items:Pancake[], records:ExecutionRecord[], completionItems:CompletionItem[], undoHistory:UndoEntry[]) {
+  const entityByKey = new Map<string, {id:string; creationOrdinal:number}>();
+  for (const entity of [...items, ...records]) {
+    if (!isEntityKey(entity.entityKey) || !Number.isSafeInteger(entity.creationOrdinal) || entity.creationOrdinal < 1
+      || entityByKey.has(entity.entityKey)) {
+      throw new Error("保存データのお好み焼き内部IDまたは関連付けが正しくありません。");
+    }
+    entityByKey.set(entity.entityKey, {id:entity.id, creationOrdinal:entity.creationOrdinal});
+  }
+  if (entityByKey.size > MAX_PANCAKE_IDS) {
+    throw new KitchenError("id_capacity", "保存データに表示上限（192個）を超えるお好み焼きがあります。保存データは変更していません。");
+  }
+  const entities = [...entityByKey.entries()].sort((a, b) => a[1].creationOrdinal - b[1].creationOrdinal);
+  for (let index = 1; index < entities.length; index += 1) {
+    if (entities[index - 1][1].creationOrdinal === entities[index][1].creationOrdinal) {
+      throw new Error("保存データに重複したお好み焼き作成順があります。");
+    }
+  }
+  const idByKey = new Map<string, string>();
+  entities.forEach(([entityKey], index) => idByKey.set(entityKey, pancakeIdForOrdinal(index + 1)));
+  for (const item of completionItems) {
+    if (!entityByKey.has(item.entityKey)) throw new Error("完成ボックスのお好み焼き内部IDを実行記録から照合できません。");
+  }
+  const changed = [...items, ...records, ...completionItems].some(entity => entity.id !== idByKey.get(entity.entityKey));
+  const relabel = <T extends {id:string; entityKey:string}>(entity:T):T => {
+    const id = idByKey.get(entity.entityKey);
+    if (!id) return entity;
+    return {...entity, id};
+  };
+  const normalizedUndo = undoHistory.map(entry => {
+    const id = idByKey.get(entry.entityKey) ?? entry.id;
+    if (entry.type === "create") return {...entry, id};
+    if (entry.type === "move") {
+      const overflowPlateRestore = entry.overflowPlateRestore
+        ? {...entry.overflowPlateRestore, positions:entry.overflowPlateRestore.positions.map(position => ({...position, id:idByKey.get(position.entityKey) ?? position.id}))}
+        : undefined;
+      return {...entry, id, ...(overflowPlateRestore ? {overflowPlateRestore} : {})};
+    }
+    const pancake = relabel(entry.pancake);
+    return {...entry, id, pancake};
+  });
+  return {
+    changed,
+    items:items.map(relabel),
+    records:records.map(relabel),
+    completionItems:completionItems.map(relabel),
+    undoHistory:normalizedUndo,
+  };
+}
+
+function validateStrictEntityMetadata(input:{
+  items:readonly StoredPancake[];
+  records:unknown;
+  completionItems:unknown;
+  undoHistory?:unknown;
+  doughBatch?:unknown;
+  nextCreationOrdinal?:unknown;
+}):void {
+  const isObject = (value:unknown):value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+  const validEntity = (value:unknown) => isObject(value)
+    && isEntityKey(value.entityKey)
+    && Number.isSafeInteger(value.creationOrdinal)
+    && (value.creationOrdinal as number) >= 1;
+  if (!Number.isSafeInteger(input.nextCreationOrdinal) || (input.nextCreationOrdinal as number) < 1
+    || !input.items.every(validEntity)
+    || !Array.isArray(input.records) || !input.records.every(validEntity)
+    || !Array.isArray(input.completionItems) || !input.completionItems.every(validEntity)
+    || !Array.isArray(input.undoHistory)) {
+    throw new Error("schema 8の内部ID情報が不足しています。");
+  }
+  for (const entry of input.undoHistory) {
+    if (!validEntity(entry)) throw new Error("schema 8の操作取り消し内部IDが不足しています。");
+    if (entry.type === "delete" && (!validEntity(entry.pancake)
+      || !(entry.discardRecordEntityKey === null || isEntityKey(entry.discardRecordEntityKey)))) {
+      throw new Error("schema 8の削除取り消し内部IDが不足しています。");
+    }
+    if (entry.type === "move" && entry.overflowPlateRestore !== undefined) {
+      const restore = entry.overflowPlateRestore;
+      if (!isObject(restore) || !Array.isArray(restore.positions) || !restore.positions.every(validEntity)) {
+        throw new Error("schema 8の移動取り消し内部IDが不足しています。");
+      }
+    }
+  }
+  if (input.doughBatch !== null && input.doughBatch !== undefined) {
+    if (!isObject(input.doughBatch) || !Array.isArray(input.doughBatch.placedEntityKeys)
+      || Object.prototype.hasOwnProperty.call(input.doughBatch, "placedIds")) {
+      throw new Error("schema 8の生地配置内部IDが不足しています。");
+    }
+  }
+}
+
+function validateUndoEntityReferences(items:Pancake[], records:ExecutionRecord[], completionItems:CompletionItem[], undoHistory:UndoEntry[]):void {
+  const itemKeys = new Set(items.map(item => item.entityKey));
+  const recordKeys = new Set(records.map(record => record.entityKey));
+  const completionKeys = new Set(completionItems.map(item => item.entityKey));
+  const deleteUndoKeys = new Set(undoHistory.filter((entry):entry is Extract<UndoEntry, {type:"delete"}> => entry.type === "delete").map(entry => entry.entityKey));
+  for (const entry of undoHistory) {
+    if (entry.type === "create" && ((!itemKeys.has(entry.entityKey) && !deleteUndoKeys.has(entry.entityKey))
+      || (recordKeys.has(entry.entityKey) && !deleteUndoKeys.has(entry.entityKey)) || completionKeys.has(entry.entityKey))) {
+      throw new Error("配置Undo履歴のお好み焼き内部IDを盤面から照合できません。");
+    }
+    if (entry.type === "move" && !itemKeys.has(entry.entityKey) && !deleteUndoKeys.has(entry.entityKey)) {
+      throw new Error("移動Undo履歴のお好み焼き内部IDを盤面から照合できません。");
+    }
+    if (entry.type === "move" && entry.overflowPlateRestore
+      && entry.overflowPlateRestore.positions.some(position => !itemKeys.has(position.entityKey) && !deleteUndoKeys.has(position.entityKey))) {
+      throw new Error("過密配置Undo履歴のお好み焼き内部IDを盤面から照合できません。");
+    }
+    if (entry.type === "delete" && (itemKeys.has(entry.entityKey)
+      || (entry.discardRecordEntityKey === null ? recordKeys.has(entry.entityKey) : !recordKeys.has(entry.discardRecordEntityKey)))) {
+      throw new Error("削除Undo履歴のお好み焼き内部IDを保存状態から照合できません。");
+    }
+  }
 }
 
 function savedPositionIsValid(x: unknown, y: unknown): x is number {
@@ -425,7 +765,9 @@ function normalizeUndoHistory(value: unknown, records: readonly ExecutionRecord[
       throw new Error("保存データの操作取り消し履歴が正しくありません。");
     }
     operationIds.add(entry.operationId);
-    if (entry.type === "create") return {operationId:entry.operationId, type:entry.type, id:entry.id};
+    const entityKey = entityKeyFor(entry.id, entry.entityKey);
+    const creationOrdinal = creationOrdinalFor(entry.id, entry.creationOrdinal);
+    if (entry.type === "create") return {operationId:entry.operationId, type:entry.type, id:entry.id, entityKey, creationOrdinal};
     if (entry.type === "move") {
       const from = entry.from;
       if (!from || typeof from !== "object" || Array.isArray(from)) {
@@ -476,7 +818,7 @@ function normalizeUndoHistory(value: unknown, records: readonly ExecutionRecord[
             throw new Error("保存データの過密鉄板Undo履歴が正しくありません。");
           }
           positionIds.add(savedPosition.id);
-          return {id:savedPosition.id, plate:plate as 1|2, x:savedPosition.x as number, y:savedPosition.y as number};
+          return {id:savedPosition.id, entityKey:entityKeyFor(savedPosition.id, savedPosition.entityKey), creationOrdinal:creationOrdinalFor(savedPosition.id, savedPosition.creationOrdinal), plate:plate as 1|2, x:savedPosition.x as number, y:savedPosition.y as number};
         });
         if (!positionIds.has(entry.id)) throw new Error("保存データの過密鉄板Undo履歴が対象IDと一致しません。");
         overflowPlateRestore = {
@@ -493,6 +835,8 @@ function normalizeUndoHistory(value: unknown, records: readonly ExecutionRecord[
         operationId:entry.operationId,
         type:entry.type,
         id:entry.id,
+        entityKey,
+        creationOrdinal,
         from:{plate:position.plate, x:cell?.x ?? position.x as number, y:cell?.y ?? position.y as number},
         ...(overflowPlateRestore ? {overflowPlateRestore} : {}),
       };
@@ -516,18 +860,26 @@ function normalizeUndoHistory(value: unknown, records: readonly ExecutionRecord[
       } catch {
         throw new Error("保存データの削除取り消し履歴が正しくありません。");
       }
-      if (pancake.id !== entry.id || !(entry.discardRecordId === null || entry.discardRecordId === pancake.id)) {
+      const pancakeEntityKey = entityKeyFor(pancake.id, savedPancake.entityKey);
+      const discardRecordEntityKey = entry.discardRecordEntityKey !== undefined
+        ? (entry.discardRecordEntityKey === null || isEntityKey(entry.discardRecordEntityKey) ? entry.discardRecordEntityKey as string|null : undefined)
+        : entry.discardRecordId === null ? null
+          : typeof entry.discardRecordId === "string" ? legacyEntityKey(entry.discardRecordId) : undefined;
+      if (pancake.id !== entry.id || pancakeEntityKey !== entityKey
+        || (discardRecordEntityKey === undefined)
+        || !(discardRecordEntityKey === null || discardRecordEntityKey === entityKey)) {
         throw new Error("保存データの削除取り消し履歴が正しくありません。");
       }
+      pancake = {...pancake, entityKey, creationOrdinal};
       if (canonicalizePositions) {
         const cell = nearestGridCell(pancake.x, pancake.y);
         pancake = {...pancake, x:cell.x, y:cell.y};
       }
-      if (entry.discardRecordId !== null && !records.some(record => record.id === entry.discardRecordId
+      if (discardRecordEntityKey !== null && !records.some(record => record.entityKey === discardRecordEntityKey
         && record.unavailableReason === PLATE_DISCARD_REASON && record.serveTimerStartedAt === null)) {
         throw new Error("保存データの盤外破棄記録を取り消し履歴と照合できません。");
       }
-      return {operationId:entry.operationId, type:entry.type, id:entry.id, pancake, discardRecordId:entry.discardRecordId as string | null};
+      return {operationId:entry.operationId, type:entry.type, id:entry.id, entityKey, creationOrdinal, pancake, discardRecordEntityKey};
     }
     throw new Error("保存データの操作取り消し履歴が正しくありません。");
   });
@@ -544,84 +896,70 @@ export function normalizeBoardData(input: {
   completionItems: unknown;
   generation?: unknown;
   nextPancakeOrdinal?: unknown;
+  nextCreationOrdinal?:unknown;
   undoHistory?: unknown;
+  doughBatch?: unknown;
+  strictPublicIds?:boolean;
+  strictEntityMetadata?:boolean;
 }): NormalizedBoardData {
+  if (input.strictEntityMetadata) validateStrictEntityMetadata(input);
   const generation = input.generation === undefined ? INITIAL_BOARD_GENERATION : input.generation;
   if (!Number.isSafeInteger(generation) || (generation as number) < INITIAL_BOARD_GENERATION) {
     throw new Error("保存データの盤面世代が正しくありません。");
   }
   const records = normalizeExecutionRecords(input.records);
-  const completionBeforeMigration = normalizeCompletionItems(input.completionItems, records);
+  const initialCompletion = normalizeCompletionItems(input.completionItems, records);
   let items = normalizePancakes(input.items);
-  const activeIds = new Set<string>();
-  for (const item of items) {
-    if (activeIds.has(item.id)) throw new Error("保存データに重複したお好み焼きIDがあります。");
-    activeIds.add(item.id);
-  }
-  if (items.some(item => records.some(record => record.id === item.id))) {
-    throw new Error("鉄板上のお好み焼きと実行記録のIDが重複しています。");
-  }
-  if (completionBeforeMigration.some(item => activeIds.has(item.id))) {
-    throw new Error("完成ボックスと鉄板上のお好み焼きのIDが重複しています。");
-  }
-
-  const allSavedIds = [...items.map(item => item.id), ...records.map(record => record.id), ...completionBeforeMigration.map(item => item.id)];
-  const greatestSavedOrdinal = allSavedIds.reduce((greatest, id) => Math.max(greatest, pancakeOrdinalForId(id) ?? 0), 0);
+  const originalIds = [
+    ...items.map(item => item.id),
+    ...records.map(record => record.id),
+    ...initialCompletion.map(item => item.id),
+  ];
+  const greatestSavedOrdinal = originalIds.reduce((greatest, id) => Math.max(greatest, pancakeOrdinalForId(id) ?? 0), 0);
+  const hasIdentityMetadata = (value:unknown):boolean => typeof value === "object" && value !== null && !Array.isArray(value)
+    && isEntityKey((value as Record<string, unknown>).entityKey)
+    && Number.isSafeInteger((value as Record<string, unknown>).creationOrdinal)
+    && ((value as Record<string, unknown>).creationOrdinal as number) >= 1;
+  const rawRecords = Array.isArray(input.records) ? input.records : [];
+  const rawCompletionItems = Array.isArray(input.completionItems) ? input.completionItems : [];
+  const rawIdentityEntities:unknown[] = [...input.items, ...rawRecords, ...rawCompletionItems];
+  const identityMetadataPresent = input.nextCreationOrdinal !== undefined
+    || rawIdentityEntities.length === 0
+    || rawIdentityEntities.every(hasIdentityMetadata);
   let nextPancakeOrdinal: number;
   if (input.nextPancakeOrdinal === undefined) {
-    if (greatestSavedOrdinal > 0) {
-      throw new Error("M-N形式のお好み焼きIDがある保存データには採番カウンターが必要です。");
-    }
     nextPancakeOrdinal = Math.max(INITIAL_PANCAKE_ORDINAL, greatestSavedOrdinal + 1);
   } else {
     if (!Number.isSafeInteger(input.nextPancakeOrdinal)
       || (input.nextPancakeOrdinal as number) < INITIAL_PANCAKE_ORDINAL
       || (input.nextPancakeOrdinal as number) > MAX_PANCAKE_IDS + 1
-      || (input.nextPancakeOrdinal as number) <= greatestSavedOrdinal) {
+      || (!identityMetadataPresent && (input.nextPancakeOrdinal as number) <= greatestSavedOrdinal)) {
       throw new Error("保存データのお好み焼き採番カウンターが正しくありません。");
     }
     nextPancakeOrdinal = input.nextPancakeOrdinal as number;
   }
 
-  const remappedIds = new Map<string, string>();
-  const allocateLegacyId = (id: string) => {
-    if (!isUuidV4(id)) return id;
-    const existing = remappedIds.get(id);
-    if (existing) return existing;
-    if (nextPancakeOrdinal > MAX_PANCAKE_IDS) {
-      throw new KitchenError("id_capacity", "旧データに現在のID形式へ移行できない数のお好み焼きがあります。保存データは変更していません。");
-    }
-    const migrated = pancakeIdForOrdinal(nextPancakeOrdinal++);
-    remappedIds.set(id, migrated);
-    return migrated;
-  };
-
   const overCapacity = !hasGridCapacity(items);
   if (!overCapacity) items = canonicalizeItemPositions(items);
-  items = items.map(item => ({...item, id:allocateLegacyId(item.id)}));
-  const completionItems = completionBeforeMigration.map(item => ({...item, id:allocateLegacyId(item.id)}));
-  const migratedRecords = records.map(record => {
-    const id = remappedIds.get(record.id);
-    return id ? {...record, id} : record;
-  });
-
-  const migratedIds = new Set<string>();
-  for (const item of items) {
-    if (migratedIds.has(item.id)) throw new Error("移行後のお好み焼きIDが重複しています。");
-    migratedIds.add(item.id);
-  }
-  if (items.some(item => migratedRecords.some(record => record.id === item.id))) {
-    throw new Error("移行後の鉄板上お好み焼きと実行記録のIDが重複しています。");
-  }
-  const normalizedRecords = normalizeExecutionRecords(migratedRecords);
-  const undoHistory = normalizeUndoHistory(input.undoHistory, normalizedRecords, !overCapacity);
+  const undoHistory = normalizeUndoHistory(input.undoHistory, records, !overCapacity);
+  const assigned = assignEntityOrdinals(items, records, initialCompletion, undoHistory, input.nextCreationOrdinal, nextPancakeOrdinal);
+  items = assigned.items;
+  const normalizedRecords = assigned.records;
+  const normalizedCompletion = assigned.completionItems;
+  const normalizedUndo = assigned.undoHistory;
+  validateUndoEntityReferences(items, normalizedRecords, normalizedCompletion, normalizedUndo);
+  const dense = relabelEntities(items, normalizedRecords, normalizedCompletion, normalizedUndo);
+  if (input.strictPublicIds && dense.changed) throw new Error("保存データの公開IDが連続していません。");
+  const doughBatch = normalizeDoughBatch(input.doughBatch, nextPancakeOrdinal);
   return {
     generation:generation as number,
-    items,
-    records:normalizedRecords,
-    completionItems:normalizeCompletionItems(completionItems, normalizedRecords),
+    items:dense.items,
+    records:dense.records,
+    completionItems:dense.completionItems,
     nextPancakeOrdinal,
-    undoHistory,
+    nextCreationOrdinal:assigned.nextCreationOrdinal,
+    undoHistory:dense.undoHistory,
+    ...(doughBatch === undefined ? {} : {doughBatch}),
   };
 }
 
@@ -664,7 +1002,9 @@ function normalizeChangedBoard(snapshot: Snapshot): Snapshot {
     completionItems:snapshot.completionItems,
     generation:snapshot.generation,
     nextPancakeOrdinal:snapshot.nextPancakeOrdinal,
+    nextCreationOrdinal:snapshot.nextCreationOrdinal,
     undoHistory:snapshot.undoHistory,
+    ...(Object.prototype.hasOwnProperty.call(snapshot, "doughBatch") ? {doughBatch:snapshot.doughBatch} : {}),
   });
   return {...snapshot, ...board};
 }
@@ -697,8 +1037,20 @@ export function parseCommand(input: unknown): Command {
   const generation = c.expectedGeneration as number | undefined;
   const withGeneration = <T extends object>(command: T): T & {expectedGeneration?:number} =>
     generation === undefined ? command : {...command, expectedGeneration:generation};
-  if (c.type === "delete") throw new KitchenError("delete_removed", "盤外削除は廃止されました。画面を再読み込みしてください。");
+  if (c.type === "delete" && isPancakeId(c.id) && Number.isSafeInteger(c.expectedVersion) && (c.expectedVersion as number) > 0
+    && Number.isSafeInteger(c.expectedGeneration) && (c.expectedGeneration as number) >= INITIAL_BOARD_GENERATION) {
+    return {operationId:c.operationId, expectedGeneration:c.expectedGeneration as number, type:"delete", id:c.id, expectedVersion:c.expectedVersion as number};
+  }
   if (c.type === "reset") return withGeneration({operationId:c.operationId, type:"reset"});
+  const validNextOrdinal = Number.isSafeInteger(c.expectedNextPancakeOrdinal)
+    && (c.expectedNextPancakeOrdinal as number) >= INITIAL_PANCAKE_ORDINAL
+    && (c.expectedNextPancakeOrdinal as number) <= MAX_PANCAKE_IDS + 1;
+  if (c.type === "doughStart" && c.expectedDoughBatchId === null && validNextOrdinal) {
+    return withGeneration({operationId:c.operationId, type:c.type, expectedDoughBatchId:null, expectedNextPancakeOrdinal:c.expectedNextPancakeOrdinal as number});
+  }
+  if ((c.type === "doughReset" || c.type === "doughDiscardAndStart") && isUuidV4(c.expectedDoughBatchId) && validNextOrdinal) {
+    return withGeneration({operationId:c.operationId, type:c.type, expectedDoughBatchId:c.expectedDoughBatchId, expectedNextPancakeOrdinal:c.expectedNextPancakeOrdinal as number});
+  }
   if (c.type === "undo" && isUuidV4(c.expectedUndoOperationId)) {
     return withGeneration({operationId:c.operationId, type:"undo", expectedUndoOperationId:c.expectedUndoOperationId});
   }
@@ -706,7 +1058,20 @@ export function parseCommand(input: unknown): Command {
     // Preserve an old client's UUID in the parsed command so its request hash
     // remains stable across upgrades; the board storage still assigns the ID.
     if (c.id !== undefined && !isUuidV4(c.id)) throw new KitchenError("invalid", "操作内容が正しくありません。", 400);
-    return withGeneration({ operationId:c.operationId, type:c.type, id:c.id as string | undefined, plate:c.plate, x:c.x, y:c.y });
+    const hasDoughBatch = Object.prototype.hasOwnProperty.call(c, "expectedDoughBatchId");
+    const hasNextOrdinal = Object.prototype.hasOwnProperty.call(c, "expectedNextPancakeOrdinal");
+    if (hasDoughBatch !== hasNextOrdinal
+      || (hasDoughBatch && !(c.expectedDoughBatchId === null || isUuidV4(c.expectedDoughBatchId)))
+      || (hasNextOrdinal && (!validNextOrdinal))) throw new KitchenError("invalid", "生地セットの操作前提が正しくありません。", 400);
+    return withGeneration({
+      operationId:c.operationId,
+      type:c.type,
+      id:c.id as string | undefined,
+      plate:c.plate,
+      x:c.x,
+      y:c.y,
+      ...(hasDoughBatch ? {expectedDoughBatchId:c.expectedDoughBatchId as string|null, expectedNextPancakeOrdinal:c.expectedNextPancakeOrdinal as number} : {}),
+    });
   }
   if ((c.type === "start" || c.type === "remove" || c.type === "adjust" || c.type === "move") && isPancakeId(c.id) && Number.isSafeInteger(c.expectedVersion) && (c.expectedVersion as number) > 0) {
     const base = { operationId:c.operationId, id:c.id, expectedVersion:c.expectedVersion as number };
@@ -719,13 +1084,16 @@ export function parseCommand(input: unknown): Command {
   throw new KitchenError("invalid", "操作内容が正しくありません。", 400);
 }
 export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: number): Snapshot {
+  const doughTracked = Object.prototype.hasOwnProperty.call(snapshot, "doughBatch");
   const board = normalizeBoardData({
     items:snapshot.items,
     records:snapshot.records ?? [],
     completionItems:snapshot.completionItems ?? [],
     generation:snapshot.generation,
     nextPancakeOrdinal:snapshot.nextPancakeOrdinal,
+    nextCreationOrdinal:snapshot.nextCreationOrdinal,
     undoHistory:snapshot.undoHistory ?? [],
+    ...(doughTracked ? {doughBatch:snapshot.doughBatch} : {}),
   });
   const canonicalItems = board.items;
   const records = board.records;
@@ -748,9 +1116,83 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
       records:[],
       completionItems:[],
       nextPancakeOrdinal:INITIAL_PANCAKE_ORDINAL,
+      nextCreationOrdinal:INITIAL_PANCAKE_ORDINAL,
       undoHistory:[],
+      ...(doughTracked ? {doughBatch:null} : {}),
       serverNow:now,
     };
+  }
+  if (command.type === "doughStart" || command.type === "doughReset" || command.type === "doughDiscardAndStart") {
+    if (!doughTracked) throw new KitchenError("unsupported", "この保存先では生地タイマーを操作できません。");
+    const current = board.doughBatch ?? null;
+    if (command.expectedDoughBatchId !== (current?.batchId ?? null)
+      || command.expectedNextPancakeOrdinal !== board.nextPancakeOrdinal) {
+      throw new KitchenError("dough_conflict", "生地セットまたは次のお好み焼きIDが更新されています。最新の表示を確認してください。");
+    }
+    if (command.type === "doughStart" && current !== null) {
+      throw new KitchenError("dough_conflict", "生地セットはすでに開始されています。最新の表示を確認してください。");
+    }
+    if (command.type === "doughReset" && (!current || current.completedAt === null)) {
+      throw new KitchenError("dough_incomplete", "24個の配置が完了した後に生地リセットを押してください。");
+    }
+    if (command.type === "doughDiscardAndStart" && (!current || current.completedAt !== null || now <= current.deadlineAt)) {
+      throw new KitchenError("dough_not_expired", "期限超過後に残りを廃棄して次セットを開始してください。");
+    }
+    let firstPancakeOrdinal: number;
+    if (command.type === "doughDiscardAndStart") {
+      if (!current) throw new KitchenError("dough_conflict", "期限切れの生地セットを確認できません。最新の表示を確認してください。");
+      firstPancakeOrdinal = current.firstPancakeOrdinal + DOUGH_BATCH_SIZE;
+    } else {
+      firstPancakeOrdinal = nextDoughBatchFirstOrdinal(board.nextPancakeOrdinal);
+    }
+    if (firstPancakeOrdinal + DOUGH_BATCH_SIZE - 1 > MAX_PANCAKE_IDS) {
+      throw new KitchenError("id_capacity", "お好み焼きIDの上限に達しているため、次の24個セットを開始できません。");
+    }
+    if (board.generation >= Number.MAX_SAFE_INTEGER) throw new KitchenError("invalid_state", "盤面世代が上限に達したため、生地セットを開始できません。");
+    if (!Number.isSafeInteger(now) || now < 0 || now + DOUGH_BATCH_DURATION > Number.MAX_SAFE_INTEGER) {
+      throw new KitchenError("invalid_state", "端末時刻を確認できないため、生地タイマーを開始できません。");
+    }
+    const nextBatch: DoughBatchState = {
+      batchId:command.operationId,
+      firstPancakeOrdinal,
+      startedAt:now,
+      deadlineAt:now + DOUGH_BATCH_DURATION,
+      placedEntityKeys:[],
+      completedAt:null,
+    };
+    return normalizeChangedBoard({
+      ...base,
+      generation:board.generation + 1,
+      nextPancakeOrdinal:firstPancakeOrdinal,
+      doughBatch:nextBatch,
+      undoHistory:[],
+      serverNow:now,
+    });
+  }
+  if (command.type === "delete") {
+    if (!doughTracked) throw new KitchenError("unsupported", "盤外削除はPages版の保存画面でのみ使えます。");
+    const item = canonicalItems.find(candidate => candidate.id === command.id);
+    if (!item) throw new KitchenError("removed", "このお好み焼きは取り出されています。");
+    if (item.version !== command.expectedVersion) throw new KitchenError("conflict", "別の端末で変更されました。最新の表示でもう一度操作してください。");
+    if (board.generation >= Number.MAX_SAFE_INTEGER) throw new KitchenError("invalid_state", "盤面世代が上限に達したため、削除できません。");
+    const discarded = item.startedAt === null ? null : collectDiscardRecord(item, now);
+    const undoEntry:UndoEntry = {
+      operationId:command.operationId,
+      type:"delete",
+      id:item.id,
+      entityKey:item.entityKey,
+      creationOrdinal:item.creationOrdinal,
+      pancake:item,
+      discardRecordEntityKey:discarded?.entityKey ?? null,
+    };
+    return normalizeChangedBoard({
+      ...base,
+      generation:board.generation + 1,
+      items:canonicalItems.filter(candidate => candidate.entityKey !== item.entityKey),
+      records:discarded ? [...records, discarded] : records,
+      undoHistory:pushUndoEntry(undoHistory, undoEntry),
+      serverNow:now,
+    });
   }
   if (command.type === "undo") {
     const latest = undoHistory[undoHistory.length - 1];
@@ -759,54 +1201,79 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
     }
     const remainingHistory = undoHistory.slice(0, -1);
     if (latest.type === "create") {
-      if (!canonicalItems.some(item => item.id === latest.id)
-        || records.some(record => record.id === latest.id)
-        || completionItems.some(item => item.id === latest.id)) {
+      const target = canonicalItems.find(item => item.entityKey === latest.entityKey);
+      if (!target || target.creationOrdinal !== latest.creationOrdinal
+        || records.some(record => record.entityKey === latest.entityKey)
+        || completionItems.some(item => item.entityKey === latest.entityKey)
+        || remainingHistory.some(entry => entry.entityKey === latest.entityKey
+          || (entry.type === "delete" && entry.pancake.entityKey === latest.entityKey)
+          || (entry.type === "move" && entry.overflowPlateRestore?.positions.some(position => position.entityKey === latest.entityKey)))) {
         throw new KitchenError("undo_conflict", "配置した楕円の状態が更新されています。最新の状態を確認してください。");
       }
       if (board.generation >= Number.MAX_SAFE_INTEGER) {
         throw new KitchenError("invalid_state", "盤面世代が上限に達したため、配置を取り消せません。");
       }
-      const remainingItems = canonicalItems.filter(item => item.id !== latest.id);
-      const remainingRecords = records.filter(record => record.id !== latest.id);
-      const remainingCompletionItems = completionItems.filter(item => item.id !== latest.id);
-      const ordinal = pancakeOrdinalForId(latest.id);
-      const canReuseId = ordinal !== null
-        && ordinal === board.nextPancakeOrdinal - 1
-        && !remainingItems.some(item => item.id === latest.id)
-        && !remainingRecords.some(record => record.id === latest.id)
-        && !remainingCompletionItems.some(item => item.id === latest.id);
+      const remainingItems = canonicalItems.filter(item => item.entityKey !== latest.entityKey);
+      const remainingRecords = records.filter(record => record.entityKey !== latest.entityKey);
+      const remainingCompletionItems = completionItems.filter(item => item.entityKey !== latest.entityKey);
+      const canReuseCreationOrdinal = target.creationOrdinal === board.nextCreationOrdinal - 1;
+      const canReusePlacementOrdinal = board.nextPancakeOrdinal > INITIAL_PANCAKE_ORDINAL;
+      if (!canReuseCreationOrdinal || !canReusePlacementOrdinal) {
+        throw new KitchenError("undo_conflict", "この配置の作成順を安全に戻せないため、操作を取り消せません。");
+      }
+      let doughBatch = board.doughBatch;
+      if (doughTracked && doughBatch !== null && doughBatch !== undefined) {
+        const currentBatch = doughBatch;
+        if (currentBatch.placedEntityKeys.at(-1) !== latest.entityKey) {
+          throw new KitchenError("undo_conflict", "この配置IDを安全に再利用できないため、操作を取り消せません。生地残数は変更していません。");
+        }
+        doughBatch = {
+          ...currentBatch,
+          placedEntityKeys:currentBatch.placedEntityKeys.slice(0, -1),
+          completedAt:null,
+        };
+      } else if (doughTracked) {
+        throw new KitchenError("undo_conflict", "この配置の生地セットを確認できないため、操作を取り消せません。");
+      }
       return normalizeChangedBoard({
         ...base,
         generation:board.generation + 1,
         items:remainingItems,
-        nextPancakeOrdinal:canReuseId ? ordinal : board.nextPancakeOrdinal,
+        nextPancakeOrdinal:board.nextPancakeOrdinal - 1,
+        nextCreationOrdinal:board.nextCreationOrdinal - 1,
         undoHistory:remainingHistory,
+        ...(doughTracked ? {doughBatch} : {}),
       });
     }
     if (latest.type === "move") {
-      const item = canonicalItems.find(candidate => candidate.id === latest.id);
+      const item = canonicalItems.find(candidate => candidate.entityKey === latest.entityKey);
       if (latest.overflowPlateRestore) {
         const restore = latest.overflowPlateRestore;
-        const restoreIds = new Set(restore.positions.map(position => position.id));
-        const currentById = new Map(canonicalItems.map(candidate => [candidate.id, candidate]));
+        const restoreKeys = new Set(restore.positions.map(position => position.entityKey));
+        const currentByKey = new Map(canonicalItems.map(candidate => [candidate.entityKey, candidate]));
         const currentItemsToCheck = restore.legacyPlate === undefined
           ? canonicalItems
           : canonicalItems.filter(candidate => candidate.plate === restore.legacyPlate);
-        if (!item || !restoreIds.has(item.id)
-          || currentItemsToCheck.some(candidate => !restoreIds.has(candidate.id))
-          || restore.positions.some(position => !currentById.has(position.id))) {
+        if (!item || !restoreKeys.has(item.entityKey)
+          || currentItemsToCheck.some(candidate => !restoreKeys.has(candidate.entityKey))
+          || restore.positions.some(position => !currentByKey.has(position.entityKey))) {
           throw new KitchenError("undo_conflict", "移動前の過密状態へ戻せません。最新の状態を確認してください。");
         }
-        if (restore.positions.some(position => (currentById.get(position.id)?.version ?? Number.MAX_SAFE_INTEGER) >= Number.MAX_SAFE_INTEGER)) {
+        if (restore.positions.some(position => (currentByKey.get(position.entityKey)?.version ?? Number.MAX_SAFE_INTEGER) >= Number.MAX_SAFE_INTEGER)) {
           throw new KitchenError("invalid_state", "楕円の更新回数が上限に達しました。");
         }
-        const restoreById = new Map(restore.positions.map(position => [position.id, position]));
+        const restoreByKey = new Map(restore.positions.map(position => [position.entityKey, position]));
         const restoredItems = canonicalItems.map(candidate => {
-          const position = restoreById.get(candidate.id);
-          return position
-            ? {...candidate, plate:position.plate, x:position.x, y:position.y, version:candidate.version + 1}
-            : candidate;
+          const position = restoreByKey.get(candidate.entityKey);
+          if (!position) return candidate;
+          return {
+            ...candidate,
+            plate:position.plate,
+            x:position.x,
+            y:position.y,
+            ...(candidate.entityKey === latest.entityKey ? {movedToUpperAt:null} : {}),
+            version:candidate.version + 1,
+          };
         });
         return normalizeChangedBoard({...base, items:restoredItems, undoHistory:remainingHistory});
       }
@@ -819,12 +1286,13 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
         throw new KitchenError("undo_conflict", "移動前のマスに戻せません。最新の状態を確認してください。");
       }
       if (item.version >= Number.MAX_SAFE_INTEGER) throw new KitchenError("invalid_state", "楕円の更新回数が上限に達しました。");
-      const restored = {...item, ...latest.from, ...(targetCell ? {x:targetCell.x, y:targetCell.y} : {}), version:item.version + 1};
+      const restored = {...item, ...latest.from, ...(targetCell ? {x:targetCell.x, y:targetCell.y} : {}), movedToUpperAt:null, version:item.version + 1};
       return normalizeChangedBoard({...base, items:canonicalItems.map(candidate => candidate.id === item.id ? restored : candidate), undoHistory:remainingHistory});
     }
-    if (canonicalItems.some(item => item.id === latest.id) || completionItems.some(item => item.id === latest.id)) {
+    if (canonicalItems.some(item => item.entityKey === latest.entityKey) || completionItems.some(item => item.entityKey === latest.entityKey)) {
       throw new KitchenError("undo_conflict", "削除した楕円のIDが既に使われています。最新の状態を確認してください。");
     }
+    if (board.generation >= Number.MAX_SAFE_INTEGER) throw new KitchenError("invalid_state", "盤面世代が上限に達したため、削除を取り消せません。");
     const overCapacity = isGridOverCapacity(canonicalItems);
     const restoredCell = overCapacity ? null : nearestGridCell(latest.pancake.x, latest.pancake.y);
     if (restoredCell
@@ -832,34 +1300,71 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
       : canonicalItems.some(item => item.plate === latest.pancake.plate && overlapsLegacy(item, latest.pancake))) {
       throw new KitchenError("undo_conflict", "削除前の場所に別の楕円があるため戻せません。最新の状態を確認してください。");
     }
-    if (latest.discardRecordId !== null && !records.some(record => record.id === latest.discardRecordId)) {
+    if (latest.discardRecordEntityKey !== null && !records.some(record => record.entityKey === latest.discardRecordEntityKey
+      && record.unavailableReason === PLATE_DISCARD_REASON && record.serveTimerStartedAt === null)) {
       throw new KitchenError("undo_conflict", "盤外破棄記録が更新されています。最新の状態を確認してください。");
+    }
+    if (latest.discardRecordEntityKey === null && records.some(record => record.entityKey === latest.entityKey)) {
+      throw new KitchenError("undo_conflict", "削除した楕円の実行記録が更新されています。最新の状態を確認してください。");
     }
     if (latest.pancake.version >= Number.MAX_SAFE_INTEGER) throw new KitchenError("invalid_state", "楕円の更新回数が上限に達しました。");
     const restored = {...latest.pancake, ...(restoredCell ? {x:restoredCell.x, y:restoredCell.y} : {}), version:latest.pancake.version + 1};
     return normalizeChangedBoard({
       ...base,
+      generation:board.generation + 1,
       items:[...canonicalItems, restored],
-      records:latest.discardRecordId === null ? records : records.filter(record => record.id !== latest.discardRecordId),
+      records:latest.discardRecordEntityKey === null ? records : records.filter(record => record.entityKey !== latest.discardRecordEntityKey),
       undoHistory:remainingHistory,
     });
   }
   if (command.type === "create") {
+    let nextDoughBatch: DoughBatchState | null | undefined;
+    if (doughTracked) {
+      const currentBatch = board.doughBatch ?? null;
+      if (!Object.prototype.hasOwnProperty.call(command, "expectedDoughBatchId")
+        || command.expectedDoughBatchId !== (currentBatch?.batchId ?? null)
+        || command.expectedNextPancakeOrdinal !== board.nextPancakeOrdinal) {
+        throw new KitchenError("dough_conflict", "生地セットまたは次のお好み焼きIDが更新されています。画面を再読み込みしてください。");
+      }
+      if (!currentBatch) throw new KitchenError("dough_not_started", "新しい楕円を置く前に「生地を取り出す」を押してください。");
+      if (currentBatch.completedAt !== null || currentBatch.placedEntityKeys.length >= DOUGH_BATCH_SIZE) {
+        throw new KitchenError("dough_complete", "この生地セットは24個の配置が完了しています。「生地リセット」で次のセットを開始してください。");
+      }
+      if (now > currentBatch.deadlineAt) throw new KitchenError("dough_expired", "生地の20分期限を過ぎています。配置を停止し、残りを廃棄してください。");
+      if (currentBatch.firstPancakeOrdinal + currentBatch.placedEntityKeys.length !== board.nextPancakeOrdinal) {
+        throw new KitchenError("dough_conflict", "生地セットの配置IDを確認できません。最新の表示を確認してください。");
+      }
+      nextDoughBatch = {
+        ...currentBatch,
+        placedEntityKeys:[...currentBatch.placedEntityKeys, command.operationId],
+        completedAt:currentBatch.placedEntityKeys.length + 1 === DOUGH_BATCH_SIZE ? now : null,
+      };
+    }
     const position = nearestGridCell(command.x, command.y);
     if (position.row !== GRID_ROWS - 1) {
       throw new KitchenError("upper_row_create_forbidden", "新しい楕円は下段に配置してください。上段は下段からの移動専用です。");
     }
     requireGridCapacity(canonicalItems);
     if (isGridCellOccupied(canonicalItems, command.plate, position.index)) throw new KitchenError("cell_occupied", "このマスにはすでに楕円があります。空いているマスをタップしてください。");
-    const id = pancakeIdForOrdinal(board.nextPancakeOrdinal);
-    const entry:UndoEntry = {operationId:command.operationId, type:"create", id};
-    return {...base, items:[...canonicalItems, {id, plate:command.plate, x:position.x, y:position.y, duration:TIMER_DURATION, temperature:DEFAULT_TEMPERATURE, startedAt:null, segments:[], version:1}], records, completionItems, nextPancakeOrdinal:board.nextPancakeOrdinal + 1, undoHistory:pushUndoEntry(undoHistory, entry)};
+    const currentEntityCount = new Set([...canonicalItems, ...records].map(entity => entity.entityKey)).size;
+    if (currentEntityCount >= MAX_PANCAKE_IDS) {
+      throw new KitchenError("id_capacity", "保存中のお好み焼きが表示上限（192個）に達しています。記録を確認してください。");
+    }
+    if (board.nextPancakeOrdinal > MAX_PANCAKE_IDS || board.nextCreationOrdinal >= Number.MAX_SAFE_INTEGER) {
+      throw new KitchenError("id_capacity", "お好み焼きの配置上限（192個）に達しました。新しい楕円を配置できません。");
+    }
+    const entityKey = command.operationId;
+    const creationOrdinal = board.nextCreationOrdinal;
+    const id = pancakeIdForOrdinal(currentEntityCount + 1);
+    const entry:UndoEntry = {operationId:command.operationId, type:"create", id, entityKey, creationOrdinal};
+    const created:Pancake = {id, entityKey, creationOrdinal, plate:command.plate, x:position.x, y:position.y, griddlePlacedAt:now, movedToUpperAt:null, duration:TIMER_DURATION, temperature:DEFAULT_TEMPERATURE, startedAt:null, segments:[], version:1};
+    return normalizeChangedBoard({...base, items:[...canonicalItems, created], records, completionItems, nextPancakeOrdinal:board.nextPancakeOrdinal + 1, nextCreationOrdinal:board.nextCreationOrdinal + 1, undoHistory:pushUndoEntry(undoHistory, entry), ...(doughTracked ? {doughBatch:nextDoughBatch} : {})});
   }
   if (command.type === "remove") {
     const completionItem = completionItems.find(item => item.id === command.id);
     if (completionItem) {
       if (completionItem.version !== command.expectedVersion) throw new KitchenError("conflict", "完成ボックスの状態が更新されています。最新の表示でもう一度操作してください。");
-      const record = records.find(item => item.id === completionItem.id);
+      const record = records.find(item => item.entityKey === completionItem.entityKey);
       if (!record || record.serveDeadlineAt === null || record.serveTimerStartedAt === null) {
         throw new KitchenError("invalid_state", "完成ボックスの期限を確認できません。");
       }
@@ -871,8 +1376,8 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
       return {
         ...base,
         items:canonicalItems,
-        records:records.map(item => item.id === updated.id ? updated : item),
-        completionItems:completionItems.filter(item => item.id !== completionItem.id),
+        records:records.map(item => item.entityKey === updated.entityKey ? updated : item),
+        completionItems:completionItems.filter(item => item.entityKey !== completionItem.entityKey),
         undoHistory:[],
       };
     }
@@ -887,9 +1392,9 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
     const completed = current.state === "done" ? collectRecord(item, now) : null;
     return normalizeChangedBoard({
       ...base,
-      items:canonicalItems.filter(i => i.id !== item.id),
+      items:canonicalItems.filter(i => i.entityKey !== item.entityKey),
       records:completed ? [...records, completed] : records,
-      completionItems:completed?.serveTimerStartedAt !== null && completed ? [...completionItems, {id:item.id, version:1}] : completionItems,
+      completionItems:completed?.serveTimerStartedAt !== null && completed ? [...completionItems, {id:item.id, entityKey:item.entityKey, creationOrdinal:item.creationOrdinal, version:1}] : completionItems,
       undoHistory:[],
     });
   }
@@ -909,7 +1414,7 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
     if (blockReason === "occupied") {
       throw new KitchenError("cell_occupied", "移動先の上段マスは使用中のため移動できません。");
     }
-    next = {...item, plate:command.plate, x:position.x, y:position.y, version:item.version + 1};
+    next = {...item, plate:command.plate, x:position.x, y:position.y, movedToUpperAt:now, version:item.version + 1};
   }
   else if (command.type === "adjust") {
     if (current.state === "done") throw new KitchenError("not_running", "待機中または計測中のお好み焼きだけ温度を変更できます。");
@@ -927,10 +1432,12 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
         operationId:command.operationId,
         type:"move",
         id:item.id,
+        entityKey:item.entityKey,
+        creationOrdinal:item.creationOrdinal,
         from:{plate:item.plate, x:item.x, y:item.y},
         ...(preserveOverflowPositions
           ? {overflowPlateRestore:{
-            positions:canonicalItems.map(candidate => ({id:candidate.id, plate:candidate.plate, x:candidate.x, y:candidate.y})),
+            positions:canonicalItems.map(candidate => ({id:candidate.id, entityKey:candidate.entityKey, creationOrdinal:candidate.creationOrdinal, plate:candidate.plate, x:candidate.x, y:candidate.y})),
           }}
           : {}),
       };
@@ -974,6 +1481,10 @@ function collectRecord(item: Pancake, now: number): ExecutionRecord {
   const cookCompletedAt = item.startedAt + TIMER_DURATION * 1000;
   return {
     id:item.id,
+    entityKey:item.entityKey,
+    creationOrdinal:item.creationOrdinal,
+    griddlePlacedAt:item.griddlePlacedAt,
+    movedToUpperAt:item.movedToUpperAt,
     startedAt:item.startedAt,
     collectedAt,
     segments,
@@ -986,11 +1497,25 @@ function collectRecord(item: Pancake, now: number): ExecutionRecord {
   };
 }
 
+function collectDiscardRecord(item:Pancake, now:number):ExecutionRecord {
+  const completed = collectRecord(item, now);
+  return {
+    ...completed,
+    serveTimerStartedAt:null,
+    serveDeadlineAt:null,
+    unavailableAt:completed.collectedAt,
+    unavailableReason:PLATE_DISCARD_REASON,
+  };
+}
+
 // Kept as an items-only adapter for existing model consumers. The storage
 // paths use applySnapshotCommand so completed records commit atomically.
 export function applyCommand(items: Pancake[], command: Command, now: number): Pancake[] {
   if (command.type === "undo") throw new KitchenError("invalid_state", "操作の取り消しにはボード状態が必要です。");
   if (command.type === "reset") throw new KitchenError("invalid_state", "盤面の初期化にはボード状態が必要です。");
+  if (command.type === "doughStart" || command.type === "doughReset" || command.type === "doughDiscardAndStart") {
+    throw new KitchenError("invalid_state", "生地セットの操作にはボード状態が必要です。");
+  }
   const greatestOrdinal = items.reduce((greatest, item) => Math.max(greatest, pancakeOrdinalForId(item.id) ?? 0), 0);
   const board = normalizeBoardData({items, records:[], completionItems:[], nextPancakeOrdinal:greatestOrdinal + 1});
   const migratedIdByOriginal = new Map(items.map((item, index) => [item.id, board.items[index].id]));

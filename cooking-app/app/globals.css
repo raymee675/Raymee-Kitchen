@@ -61,6 +61,26 @@
 .pages-completion-shortcut a{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:44px;padding:7px 14px;border:1px solid #c7d9b9;border-radius:999px;background:#f3f8ef;color:#30462a;font-size:14px;font-weight:700;text-decoration:none;box-shadow:0 3px 12px #27313a20;pointer-events:auto}
 .pages-completion-shortcut b{display:inline-grid;place-items:center;min-width:23px;height:23px;padding:0 5px;border-radius:999px;background:#dce9d2;color:#253a1d;font-variant-numeric:tabular-nums}
 .pages-kitchen .completion-box{scroll-margin-top:64px}
+.pages-kitchen .dough-timer-card{margin:12px 0 18px;padding:14px 16px;border:1px solid #d8c6b4;border-radius:12px;background:#fffaf5;color:#343b41}
+.dough-timer-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.dough-timer-heading h2{margin:0;font-size:17px}
+.dough-timer-heading p{margin:3px 0 0;color:#68717a;font-size:12px;line-height:1.5}
+.dough-count{display:inline-grid;place-items:center;min-width:64px;min-height:38px;padding:4px 10px;border-radius:999px;background:#f0e7dc;color:#663e26;font-size:17px;font-weight:800;font-variant-numeric:tabular-nums}
+.dough-timer-message,.dough-timer-note,.dough-timer-warning,.dough-timer-complete{margin:10px 0 0;font-size:13px;line-height:1.6}
+.dough-timer-note{padding:8px 10px;border-radius:8px;background:#f2f5f7;color:#45515b}
+.dough-timer-warning{padding:10px 12px;border:1px solid #edb3a9;border-radius:8px;background:#fff1ee;color:#922d22}
+.dough-timer-warning p{margin:4px 0 0}
+.dough-timer-complete{color:#286441;font-weight:800}
+.dough-timer-active{display:grid;grid-template-columns:auto 1fr;align-items:center;column-gap:12px;margin-top:10px}
+.dough-clock{grid-row:span 2;color:#713e1f;font-size:34px;line-height:1;font-variant-numeric:tabular-nums}
+.dough-clock-caption{color:#68717a;font-size:12px}
+.dough-timer-active p{margin:4px 0 0;font-size:13px}
+.dough-timer-active small{grid-column:1/-1;margin-top:7px;color:#68717a;font-size:11px;line-height:1.5}
+.dough-timer-button{display:inline-flex;align-items:center;justify-content:center;min-height:44px;margin-top:11px;padding:9px 15px;border:1px solid #a94b20;border-radius:8px;background:#a94b20;color:white;font:inherit;font-size:14px;font-weight:750;cursor:pointer}
+.dough-timer-button:disabled{opacity:.52;cursor:wait}
+.dough-discard-button{border-color:#a52e23;background:#a52e23}
+.dough-expired{border-color:#e8aaa0!important;background:#fff8f6!important}
+.dough-complete{border-color:#b6d5c0!important;background:#f7fcf8!important}
 .pages-guide{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:13px 18px;align-items:start}
 .pages-guide>div{align-items:flex-start;min-width:0}
 .pages-guide .guide-mark{flex:0 0 24px;width:24px;height:24px;font-size:11px}
@@ -82,8 +102,19 @@
 .backup-preview>div{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;margin-top:12px}
 .backup-restore-button{min-height:44px;padding:8px 12px;border:1px solid #b93825;border-radius:8px;background:#b93825;color:#fff;font:inherit;font-size:13px;font-weight:700}
 .backup-restore-button:disabled{opacity:.55;cursor:wait}
+.pages-kitchen .oval.long-press-armed>ellipse{stroke:#f3a22f;stroke-width:10;filter:drop-shadow(0 0 9px #f3a22f99)}
+.pages-kitchen .oval.delete-dragging>ellipse{stroke:#c5261a;stroke-width:12;filter:drop-shadow(0 0 12px #c5261aaa)}
+.delete-drag-cue{position:fixed;top:calc(8px + env(safe-area-inset-top));left:50%;z-index:30;display:grid;gap:3px;width:max-content;max-width:calc(100vw - 24px);padding:10px 14px;transform:translateX(-50%);border:1px solid #d79a37;border-radius:10px;background:#fff8e9;color:#49330d;text-align:center;box-shadow:0 4px 18px #2226;pointer-events:none}
+.delete-drag-cue strong{font-size:14px;line-height:1.35}
+.delete-drag-cue span{font-size:12px;line-height:1.35}
+.delete-drag-cue.outside{border-color:#b93024;background:#fff0ed;color:#7f1d16}
 @media(max-width:600px){
  .pages-storage-note{margin:7px 0 0;padding:7px 9px;font-size:11px}
+ .pages-kitchen .dough-timer-card{margin:9px 0 13px;padding:11px 12px}
+ .dough-timer-heading h2{font-size:15px}
+ .dough-timer-active{column-gap:9px}
+ .dough-clock{font-size:30px}
+ .dough-timer-button{width:100%;min-height:46px}
  .pages-guide{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 12px;padding:18px 0 14px}
  .pages-guide>div{gap:7px}
  .pages-guide>div>span:last-child{font-size:11px}

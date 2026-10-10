@@ -1,10 +1,10 @@
-import { INITIAL_BOARD_GENERATION, LEGACY_OVAL_RX, LEGACY_OVAL_RY, isPancakeId, normalizeBoardData, type CompletionItem, type ExecutionRecord, type Pancake, type Snapshot, type StoredPancake, type UndoEntry } from "./kitchen-model";
+import { INITIAL_BOARD_GENERATION, LEGACY_OVAL_RX, LEGACY_OVAL_RY, isPancakeId, normalizeBoardData, type CompletionItem, type DoughBatchState, type ExecutionRecord, type Pancake, type Snapshot, type StoredPancake, type UndoEntry } from "./kitchen-model";
 
 const siteSegment = typeof window === "undefined"
   ? "root"
   : encodeURIComponent(window.location.pathname.split("/").filter(Boolean)[0] ?? "root");
 export const LOCAL_BOARD_KEY = `teppan-timer:${siteSegment}:single-phone-board:v1`;
-export const LOCAL_BOARD_SCHEMA = 6;
+export const LOCAL_BOARD_SCHEMA = 9;
 export const LOCAL_BACKUP_FORMAT = "teppan-timer-pages-board";
 export const LOCAL_BACKUP_FORMAT_VERSION = 1;
 
@@ -16,7 +16,9 @@ type StoredBoard = {
   records: ExecutionRecord[];
   completionItems: CompletionItem[];
   nextPancakeOrdinal: number;
+  nextCreationOrdinal:number;
   undoHistory: UndoEntry[];
+  doughBatch: DoughBatchState | null;
 };
 
 export type ParsedLocalBoardBackup = {
@@ -41,7 +43,7 @@ function validItem(value: unknown): value is StoredPancake {
 }
 
 function decode(raw: string | null): StoredBoard {
-  if (raw === null) return { schemaVersion: LOCAL_BOARD_SCHEMA, revision: 0, generation:INITIAL_BOARD_GENERATION, items: [], records: [], completionItems: [], nextPancakeOrdinal:1, undoHistory:[] };
+  if (raw === null) return { schemaVersion: LOCAL_BOARD_SCHEMA, revision: 0, generation:INITIAL_BOARD_GENERATION, items: [], records: [], completionItems: [], nextPancakeOrdinal:1, nextCreationOrdinal:1, undoHistory:[], doughBatch:null };
 
   let value: unknown;
   try {
@@ -57,16 +59,21 @@ function decode(raw: string | null): StoredBoard {
   const rawGeneration = isRecord(value) ? value.generation : undefined;
   const rawItems = legacyItems ?? (isRecord(value) ? value.items : null);
   const rawNextPancakeOrdinal = isRecord(value) ? value.nextPancakeOrdinal : undefined;
+  const rawNextCreationOrdinal = isRecord(value) ? value.nextCreationOrdinal : undefined;
+  const hasDoughBatch = isRecord(value) && Object.prototype.hasOwnProperty.call(value, "doughBatch");
   const hasRecords = schemaVersion >= 2 && schemaVersion <= LOCAL_BOARD_SCHEMA;
   const rawRecords = isRecord(value) && hasRecords ? value.records : [];
   const rawCompletionItems = isRecord(value) && schemaVersion >= 3 && schemaVersion <= LOCAL_BOARD_SCHEMA ? value.completionItems : [];
   const rawUndoHistory = isRecord(value) && schemaVersion >= 5 && schemaVersion <= LOCAL_BOARD_SCHEMA ? value.undoHistory : undefined;
   if ((!legacyItems && (!isRecord(value) || !Number.isSafeInteger(schemaVersion) || (schemaVersion as number) < 1 || (schemaVersion as number) > LOCAL_BOARD_SCHEMA))
     || !Number.isSafeInteger(revision) || (revision as number) < 0
-    || (schemaVersion === LOCAL_BOARD_SCHEMA && (!Number.isSafeInteger(rawGeneration) || (rawGeneration as number) < INITIAL_BOARD_GENERATION))
+    || (schemaVersion >= 6 && (!Number.isSafeInteger(rawGeneration) || (rawGeneration as number) < INITIAL_BOARD_GENERATION))
+    || ((schemaVersion >= 7 && schemaVersion <= LOCAL_BOARD_SCHEMA) && (!hasDoughBatch || (value as Record<string, unknown>).doughBatch === undefined))
     || !Array.isArray(rawItems) || !rawItems.every(validItem)
     || (hasRecords && !Array.isArray(rawRecords))
     || (schemaVersion >= 3 && schemaVersion <= LOCAL_BOARD_SCHEMA && !Array.isArray(rawCompletionItems))
+    || ((schemaVersion >= 7 && schemaVersion <= LOCAL_BOARD_SCHEMA)
+      && (!Number.isSafeInteger(rawNextPancakeOrdinal) || (rawNextPancakeOrdinal as number) < 1 || (rawNextPancakeOrdinal as number) > 193))
     || (schemaVersion >= 4 && schemaVersion <= LOCAL_BOARD_SCHEMA && rawNextPancakeOrdinal !== undefined
       && (!Number.isSafeInteger(rawNextPancakeOrdinal) || (rawNextPancakeOrdinal as number) < 1 || (rawNextPancakeOrdinal as number) > 193))
     || (schemaVersion >= 5 && schemaVersion <= LOCAL_BOARD_SCHEMA && !Array.isArray(rawUndoHistory))) {
@@ -83,14 +90,19 @@ function decode(raw: string | null): StoredBoard {
     items:rawItems,
     records:rawRecords,
     completionItems:rawCompletionItems,
-    generation:schemaVersion === LOCAL_BOARD_SCHEMA ? rawGeneration : undefined,
+    generation:schemaVersion >= 6 ? rawGeneration : undefined,
     nextPancakeOrdinal:schemaVersion >= 4 ? rawNextPancakeOrdinal : undefined,
+    nextCreationOrdinal:schemaVersion >= 8 ? rawNextCreationOrdinal : undefined,
     undoHistory:rawUndoHistory,
+    doughBatch:schemaVersion >= 7 ? (value as Record<string, unknown>).doughBatch : null,
+    strictEntityMetadata:schemaVersion >= 8,
+    strictPublicIds:schemaVersion >= 8,
   });
   return {
     schemaVersion: LOCAL_BOARD_SCHEMA,
     revision: revision as number,
     ...board,
+    doughBatch:board.doughBatch ?? null,
   };
 }
 
@@ -101,12 +113,17 @@ function toStoredBoard(snapshot: Snapshot): StoredBoard {
     completionItems:snapshot.completionItems ?? [],
     generation:snapshot.generation,
     nextPancakeOrdinal:snapshot.nextPancakeOrdinal,
+    nextCreationOrdinal:snapshot.nextCreationOrdinal,
     undoHistory:snapshot.undoHistory ?? [],
+    doughBatch:snapshot.doughBatch ?? null,
+    strictEntityMetadata:true,
+    strictPublicIds:true,
   });
   return {
     schemaVersion: LOCAL_BOARD_SCHEMA,
     revision: snapshot.revision,
     ...board,
+    doughBatch:board.doughBatch ?? null,
   };
 }
 
@@ -144,7 +161,9 @@ export function parseLocalBoardBackup(raw: string): ParsedLocalBoardBackup {
         records:stored.records,
         completionItems:stored.completionItems,
         nextPancakeOrdinal:stored.nextPancakeOrdinal,
+        nextCreationOrdinal:stored.nextCreationOrdinal,
         undoHistory:stored.undoHistory,
+        doughBatch:stored.doughBatch,
         serverNow: Date.now(),
       },
     };
@@ -169,7 +188,7 @@ export function readLocalBoard(storage: BoardStorage = window.localStorage): Sna
       }
     }
   }
-  return { revision: stored.revision, generation:stored.generation, items: stored.items, records:stored.records, completionItems:stored.completionItems, nextPancakeOrdinal:stored.nextPancakeOrdinal, undoHistory:stored.undoHistory, serverNow: Date.now() };
+  return { revision: stored.revision, generation:stored.generation, items: stored.items, records:stored.records, completionItems:stored.completionItems, nextPancakeOrdinal:stored.nextPancakeOrdinal, nextCreationOrdinal:stored.nextCreationOrdinal, undoHistory:stored.undoHistory, doughBatch:stored.doughBatch, serverNow: Date.now() };
 }
 
 export function writeLocalBoard(snapshot: Snapshot, storage: Pick<Storage, "setItem"> = window.localStorage): void {

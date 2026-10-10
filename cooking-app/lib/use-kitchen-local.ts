@@ -178,7 +178,10 @@ export function useKitchenLocal() {
     if (backupRestoreInProgress.current) throw new Error("バックアップを復元中です。完了してから操作してください。");
     if (!activeEditor.current || !state.current) throw new Error("保存画面の準備ができていません。画面を開き直してください。");
     const command = parseCommand({...input, expectedGeneration:input.expectedGeneration ?? state.current.generation});
-    const pendingKey = command.type === "create" || command.type === "undo" || command.type === "reset" ? command.operationId : command.id;
+    const pendingKey = command.type === "create" || command.type === "undo" || command.type === "reset"
+      || command.type === "doughStart" || command.type === "doughReset" || command.type === "doughDiscardAndStart"
+      ? command.operationId
+      : command.id;
     if (pending.current.has(pendingKey)) throw new Error("このお好み焼きは操作中です。");
 
     pending.current.add(pendingKey);
@@ -195,7 +198,9 @@ export function useKitchenLocal() {
         records: applied.records,
         completionItems: applied.completionItems,
         nextPancakeOrdinal: applied.nextPancakeOrdinal,
+        nextCreationOrdinal:applied.nextCreationOrdinal,
         undoHistory: applied.undoHistory,
+        doughBatch:applied.doughBatch ?? null,
         serverNow: now,
       };
       writeLocalBoard(next);
@@ -221,6 +226,7 @@ export function useKitchenLocal() {
         setStatusMessage(message);
         setConnection("offline");
       }
+      try { publish(readLocalBoard()); } catch { /* Preserve the last confirmed view if storage cannot be reread. */ }
       toast.error(message);
       throw error;
     }).finally(() => {

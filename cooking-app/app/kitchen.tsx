@@ -6,12 +6,12 @@ import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
 import { useKitchen } from "@/lib/use-kitchen";
 import { useKitchenLocal } from "@/lib/use-kitchen-local";
-import { GRID_CELLS, GRID_COLUMNS, GRID_ROWS, OVAL_RX, OVAL_RY, completionStatus, completionTimer, gridCellAt, gridMoveBlockReason, isGridCellActuallyOccupied, isGridCellOccupied, isGridOverCapacity, nearestGridCell, timer, parseCommand, type GridMoveBlockReason, type Pancake, type Command, type Snapshot } from "@/lib/kitchen-model";
+import { DOUGH_BATCH_SIZE, GRID_CELLS, GRID_COLUMNS, GRID_ROWS, MAX_PANCAKE_IDS, OVAL_RX, OVAL_RY, completionStatus, completionTimer, doughBatchStatus, gridCellAt, gridMoveBlockReason, isGridCellActuallyOccupied, isGridCellOccupied, isGridOverCapacity, nearestGridCell, nextDoughBatchFirstOrdinal, pancakeIdForOrdinal, timer, parseCommand, type GridMoveBlockReason, type Pancake, type Command, type Snapshot } from "@/lib/kitchen-model";
 import { downloadExecutionRecords } from "@/lib/execution-record-export";
 import { createLocalBoardBackup, parseLocalBoardBackup, type ParsedLocalBoardBackup } from "@/lib/local-kitchen-storage";
 import { createUuid } from "@/lib/uuid";
 
-type Contact = { pointerId:number; expectedGeneration:number; x:number; y:number; max:number; startedAt:number; item:Pancake|null; action:"left"|"right"|null; plate:1|2; targetX:number; targetY:number };
+type Contact = { pointerId:number; expectedGeneration:number; expectedDoughBatchId:string|null; expectedNextPancakeOrdinal:number; x:number; y:number; max:number; startedAt:number; item:Pancake|null; itemEntityKey:string|null; itemId:string|null; itemVersion:number|null; action:"left"|"right"|null; plate:1|2; targetX:number; targetY:number; holdTimer:number|null; holdCancelled:boolean; longPressArmed:boolean; deleteDragging:boolean };
 type ModelContext = { registerTool:(tool:Record<string,unknown>, options:{signal:AbortSignal}) => unknown };
 type KitchenController = {
  snapshot:Snapshot|null;
@@ -40,6 +40,10 @@ function localClockLabel(timestamp:number|null) {
  if(timestamp===null)return "";
  const date=new Date(timestamp);
  return `${String(date.getHours()).padStart(2,"0")}:${String(date.getMinutes()).padStart(2,"0")}`;
+}
+
+function pancakeOrdinalLabel(ordinal:number) {
+ return ordinal <= MAX_PANCAKE_IDS ? pancakeIdForOrdinal(ordinal) : "上限";
 }
 
 function gridMoveBlockMessage(reason:GridMoveBlockReason|null) {
@@ -94,6 +98,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  const contact = useRef<Contact|null>(null);
  const backupFileInput = useRef<HTMLInputElement|null>(null);
  const [pressed,setPressed] = useState<string|null>(null);
+ const [deleteDragCue,setDeleteDragCue] = useState<{entityKey:string; dragging:boolean; outside:boolean}|null>(null);
  const plateSvgs = useRef<Partial<Record<1|2,SVGSVGElement|null>>>({});
  const actions = useRef(kitchen);
  useEffect(()=>{actions.current=kitchen;},[kitchen]);
@@ -106,9 +111,29 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    observedGeneration.current=nextGeneration;
    cancelActiveContact();
  },[snapshot?.generation]);
+ useEffect(()=>{
+   const current=contact.current;
+   if(!current?.itemEntityKey)return;
+   const latest=snapshot?.items.find(item=>item.entityKey===current.itemEntityKey);
+   if(!latest||latest.id!==current.itemId||latest.version!==current.itemVersion)cancelActiveContact();
+ },[snapshot?.items]);
  const items = snapshot?.items ?? [];
  const gridBlocked = isGridOverCapacity(items);
  const completionItems = snapshot?.completionItems ?? [];
+ const doughBatch = __PAGES_MODE__ ? snapshot?.doughBatch ?? null : null;
+ const doughStatus = doughBatchStatus(doughBatch,now);
+ const nextDoughFirstOrdinal = doughStatus==="expired"&&doughBatch
+   ? doughBatch.firstPancakeOrdinal+DOUGH_BATCH_SIZE
+   : snapshot ? nextDoughBatchFirstOrdinal(snapshot.nextPancakeOrdinal) : null;
+ const canStartNextDoughBatch = nextDoughFirstOrdinal !== null && nextDoughFirstOrdinal + DOUGH_BATCH_SIZE - 1 <= MAX_PANCAKE_IDS;
+ const doughSkippedIdsMessage = doughStatus!=="expired"&&snapshot && nextDoughFirstOrdinal !== null && nextDoughFirstOrdinal > snapshot.nextPancakeOrdinal
+   ? `未使用ID ${pancakeOrdinalLabel(snapshot.nextPancakeOrdinal)}〜${pancakeOrdinalLabel(nextDoughFirstOrdinal - 1)} は飛ばし、${pancakeOrdinalLabel(nextDoughFirstOrdinal)}から24個分を割り当てます。`
+   : null;
+ const expiredDoughSkipMessage = doughStatus==="expired"&&doughBatch
+   ? nextDoughFirstOrdinal!==null&&nextDoughFirstOrdinal<=MAX_PANCAKE_IDS
+     ? `期限切れセットのID ${pancakeOrdinalLabel(doughBatch.firstPancakeOrdinal)}〜${pancakeOrdinalLabel(doughBatch.firstPancakeOrdinal+DOUGH_BATCH_SIZE-1)} は再利用せず、${pancakeOrdinalLabel(nextDoughFirstOrdinal)}から次の24個分を割り当てます。`
+     : `期限切れセットのID ${pancakeOrdinalLabel(doughBatch.firstPancakeOrdinal)}〜${pancakeOrdinalLabel(doughBatch.firstPancakeOrdinal+DOUGH_BATCH_SIZE-1)} は再利用せず、次の24個分はID上限のため開始できません。`
+   : null;
  const counts = {blank:0,running:0,done:0};
  items.forEach(item=>counts[timer(item,now).state]++);
   const records = snapshot?.records ?? [];
@@ -149,6 +174,10 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      else if(record?.unavailableAt!==null&&record?.unavailableAt!==undefined) toast.success("提供不可として記録しました。",{duration:1800});
    }
    else if(command.type==="undo") toast.success("直前の操作を取り消しました。",{duration:1800});
+    else if(command.type==="delete") toast.success("楕円を削除しました。必要なら「操作を取り消す」で戻せます。",{duration:2200});
+   else if(command.type==="doughStart") toast.success(`生地タイマーを開始しました。ID ${pancakeOrdinalLabel(result.doughBatch?.firstPancakeOrdinal ?? 1)}から20分です。`,{duration:2400});
+   else if(command.type==="doughReset") toast.success("新しい生地セットを開始しました。",{duration:2000});
+   else if(command.type==="doughDiscardAndStart") toast.success("残りを廃棄し、新しい生地セットを開始しました。",{duration:2400});
  }).catch(()=>{}); };
  function exportRecords() {
     if (!records.length) return;
@@ -203,6 +232,14 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      toast.success("調理データを初期化しました。次のIDは1-1です。",{duration:2400});
    }).catch(()=>{}).finally(()=>{resetSubmitting.current=false;});
  }
+ function changeDoughBatch(type:"doughStart"|"doughReset"|"doughDiscardAndStart") {
+   if(!snapshot||!available||pendingIds.size>0)return;
+   const current=snapshot.doughBatch??null;
+   if(type!=="doughStart"&&!current)return;
+   const operationId=createUuid();
+   if(type==="doughStart") run({operationId,type,expectedGeneration:snapshot.generation,expectedDoughBatchId:null,expectedNextPancakeOrdinal:snapshot.nextPancakeOrdinal});
+   else if(current) run({operationId,type,expectedGeneration:snapshot.generation,expectedDoughBatchId:current.batchId,expectedNextPancakeOrdinal:snapshot.nextPancakeOrdinal});
+ }
  function perform(item:Pancake, action:string, expectedGeneration?:number) {
    const current = timer(item,kitchen.currentTime());
    const base = {operationId:createUuid(),id:item.id,expectedVersion:item.version,...(expectedGeneration===undefined?{}:{expectedGeneration})};
@@ -231,43 +268,111 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    else if ((action==="left"||action==="right") && current.state!=="done") run({...base,type:"adjust",delta:action==="right"?1:-1});
    else if ((action==="tap"||action==="up") && current.state==="done") run({...base,type:"remove"});
  }
+ function clearHoldTimer(current:Contact) {
+   if(current.holdTimer!==null)window.clearTimeout(current.holdTimer);
+   current.holdTimer=null;
+ }
+ function outsideBothPlates(clientX:number,clientY:number) {
+   const plates=[plateSvgs.current[1],plateSvgs.current[2]];
+   return plates.every(svg=>{
+     if(!svg)return false;
+     const bounds=svg.getBoundingClientRect();
+     return clientX<bounds.left||clientX>bounds.right||clientY<bounds.top||clientY>bounds.bottom;
+   });
+ }
+ function armLongPress(current:Contact) {
+   if(!current.itemEntityKey||!current.itemId)return false;
+   const controller=actions.current;
+   const latest=controller.getSnapshot();
+   const item=latest?.items.find(candidate=>candidate.entityKey===current.itemEntityKey);
+   if(controller.connection!=="online"||controller.backupBusy||latest?.generation!==current.expectedGeneration
+     ||(latest?.doughBatch?.batchId??null)!==current.expectedDoughBatchId
+     ||latest?.nextPancakeOrdinal!==current.expectedNextPancakeOrdinal
+     ||!item||item.id!==current.itemId||item.version!==current.itemVersion||controller.pendingIds.has(item.id))return false;
+   current.longPressArmed=true;
+   setDeleteDragCue({entityKey:current.itemEntityKey,dragging:false,outside:false});
+   return true;
+ }
+ function scheduleLongPress(current:Contact) {
+   const remaining=Math.max(0,450-(performance.now()-current.startedAt));
+   current.holdTimer=window.setTimeout(()=>{
+     current.holdTimer=null;
+     if(contact.current!==current||current.holdCancelled||current.max>=12||!current.itemEntityKey||!current.itemId)return;
+     if(performance.now()-current.startedAt<450){scheduleLongPress(current);return;}
+     armLongPress(current);
+   },remaining);
+ }
  function cancelActiveContact() {
    const current=contact.current;
+   contact.current=null;
    if(current) {
+     clearHoldTimer(current);
      for(const svg of Object.values(plateSvgs.current)) {
        if(svg?.hasPointerCapture(current.pointerId)) svg.releasePointerCapture(current.pointerId);
      }
    }
-   contact.current=null;
    setPressed(null);
+   setDeleteDragCue(null);
  }
  function down(event:PointerEvent<SVGSVGElement>,plate:1|2) {
    const expectedGeneration=snapshot?.generation;
    if (!available || expectedGeneration===undefined || !event.isPrimary || event.button!==0 || contact.current) return;
    const element = event.target as Element;
-   const target = element.closest("[data-item-id]");
-   const item = items.find(i=>i.id===target?.getAttribute("data-item-id")) ?? null;
+   const target = element.closest("[data-item-key]");
+   const item = items.find(i=>i.entityKey===target?.getAttribute("data-item-key")) ?? null;
    if (item && pendingIds.has(item.id)) return;
    const action = element.closest("[data-item-action]")?.getAttribute("data-item-action");
    const bounds=event.currentTarget.getBoundingClientRect();
    const targetX=(event.clientX-bounds.left)/bounds.width,targetY=(event.clientY-bounds.top)/bounds.height;
-   const current:Contact={pointerId:event.pointerId,expectedGeneration,x:event.clientX,y:event.clientY,max:0,startedAt:performance.now(),item,action:action==="left"||action==="right"?action:null,plate,targetX,targetY};
+   const current:Contact={pointerId:event.pointerId,expectedGeneration,expectedDoughBatchId:snapshot?.doughBatch?.batchId??null,expectedNextPancakeOrdinal:snapshot?.nextPancakeOrdinal??1,x:event.clientX,y:event.clientY,max:0,startedAt:performance.now(),item,itemEntityKey:item?.entityKey??null,itemId:item?.id??null,itemVersion:item?.version??null,action:action==="left"||action==="right"?action:null,plate,targetX,targetY,holdTimer:null,holdCancelled:false,longPressArmed:false,deleteDragging:false};
    contact.current=current;
-   setPressed(item?.id??null);
+   setPressed(item?.entityKey??null);
+   setDeleteDragCue(null);
    event.currentTarget.setPointerCapture(event.pointerId);
+   if(__PAGES_MODE__&&item&&!current.action)scheduleLongPress(current);
  }
  function move(event:PointerEvent<SVGSVGElement>) {
    const c=contact.current;
    if(!c||c.pointerId!==event.pointerId) return;
    c.max=Math.max(c.max,Math.hypot(event.clientX-c.x,event.clientY-c.y));
+   if(__PAGES_MODE__&&c.item&&!c.action) {
+     if(!c.longPressArmed&&c.max>=12&&!c.holdCancelled) {
+       const elapsed=performance.now()-c.startedAt;
+       if(elapsed>=450)armLongPress(c);
+       if(!c.longPressArmed){c.holdCancelled=true;clearHoldTimer(c);}
+     }
+     if(c.longPressArmed&&c.max>=12) {
+       c.deleteDragging=true;
+       const outside=outsideBothPlates(event.clientX,event.clientY);
+       setDeleteDragCue(previous=>previous?.entityKey===c.itemEntityKey&&previous.dragging&&previous.outside===outside
+         ? previous
+         : {entityKey:c.itemEntityKey!,dragging:true,outside});
+     }
+   }
  }
  function up(event:PointerEvent<SVGSVGElement>) {
    const c=contact.current;
    if (!c || c.pointerId!==event.pointerId) return;
-   contact.current=null; setPressed(null);
+   c.max=Math.max(c.max,Math.hypot(event.clientX-c.x,event.clientY-c.y));
+   const heldLongEnough=performance.now()-c.startedAt>=450;
+   const isLongPressGesture=Boolean(__PAGES_MODE__&&c.item&&!c.action&&(c.longPressArmed||(!c.holdCancelled&&heldLongEnough)));
+   const shouldDelete=Boolean(isLongPressGesture&&c.max>=12&&outsideBothPlates(event.clientX,event.clientY));
+   contact.current=null; clearHoldTimer(c); setPressed(null); setDeleteDragCue(null);
    if(event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-   if(!available||actions.current.getSnapshot()?.generation!==c.expectedGeneration) return;
-   if(Math.max(c.max,Math.hypot(event.clientX-c.x,event.clientY-c.y))>=12) return;
+   const latestSnapshot=actions.current.getSnapshot();
+   if(!available||latestSnapshot?.generation!==c.expectedGeneration
+     || (latestSnapshot?.doughBatch?.batchId??null)!==c.expectedDoughBatchId
+     || latestSnapshot?.nextPancakeOrdinal!==c.expectedNextPancakeOrdinal) return;
+   if(c.itemEntityKey) {
+     const latestItem=latestSnapshot?.items.find(item=>item.entityKey===c.itemEntityKey);
+     if(!latestItem||latestItem.id!==c.itemId||latestItem.version!==c.itemVersion)return;
+   }
+   if(shouldDelete&&c.itemId&&c.itemVersion!==null) {
+     run({operationId:createUuid(),type:"delete",id:c.itemId,expectedVersion:c.itemVersion,expectedGeneration:c.expectedGeneration});
+     return;
+   }
+   if(isLongPressGesture)return;
+   if(c.max>=12) return;
    if(c.item&&!c.action&&performance.now()-c.startedAt>=450) return;
    if(c.item) perform(c.item,c.action??"tap",c.expectedGeneration);
    else {
@@ -275,13 +380,17 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      if(cell.row!==GRID_ROWS-1) { toast.error("上段は移動専用です。下段に配置するか、下段から同じ列の上段へ移動してください。"); return; }
      if(gridBlocked) { toast.error("各鉄板が6枚以下になるまで配置できません。"); return; }
      if(isGridCellOccupied(items,c.plate,cell.index)) { toast.error("このマスにはすでに楕円があります。空いているマスをタップしてください。"); return; }
-     run({operationId:createUuid(),expectedGeneration:c.expectedGeneration,type:"create",plate:c.plate,x:cell.x,y:cell.y});
+     if(__PAGES_MODE__&&doughStatus!=="active") {
+       toast.error(doughStatus==="not_started"?"配置前に「生地を取り出す」を押してください。":doughStatus==="expired"?"生地の20分期限を過ぎています。残りを廃棄して次セットを開始してください。":"24個の配置が完了しています。生地リセットで次セットを開始してください。");
+       return;
+     }
+     run({operationId:createUuid(),expectedGeneration:c.expectedGeneration,type:"create",plate:c.plate,x:cell.x,y:cell.y,...(__PAGES_MODE__?{expectedDoughBatchId:c.expectedDoughBatchId,expectedNextPancakeOrdinal:c.expectedNextPancakeOrdinal}:{})});
    }
  }
  function cancel(event:PointerEvent<SVGSVGElement>) {
    const c=contact.current;
    if(!c||c.pointerId!==event.pointerId) return;
-   contact.current=null; setPressed(null);
+   contact.current=null; clearHoldTimer(c); setPressed(null); setDeleteDragCue(null);
  }
  function keyboard(event:KeyboardEvent<SVGElement>,item:Pancake,controlAction?:"left"|"right") {
    if(!available||pendingIds.has(item.id))return;
@@ -294,8 +403,15 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      ? (kitchen.backupBusy?"復元中":connection==="online"?"この端末に保存":connection==="connecting"?"準備中":"操作停止中")
      : {connecting:"接続中",online:"同期中",offline:"未接続",unauthorized:"要端末登録"}[connection];
   const latestUndo=snapshot?.undoHistory.at(-1);
+  const doughRemainingSeconds=doughBatch?Math.ceil(Math.max(0,doughBatch.deadlineAt-now)/1000):0;
+  const doughRemainingLabel=`${String(Math.floor(doughRemainingSeconds/60)).padStart(2,"0")}:${String(doughRemainingSeconds%60).padStart(2,"0")}`;
+  const doughPlacedCount=doughBatch?.placedEntityKeys.length??0;
   return <main className={`kitchen${__PAGES_MODE__?" pages-kitchen":""}`}>
  <Toaster position="top-center" richColors theme="light"/>
+ {__PAGES_MODE__&&deleteDragCue&&<div className={`delete-drag-cue${deleteDragCue.outside?" outside":""}`} role="status" aria-live="polite">
+   <strong>{deleteDragCue.outside?"鉄板の外です。ここで離すと削除します":"楕円を長押ししました。鉄板の外へ運んでください"}</strong>
+   <span>鉄板の上で離すとキャンセルします。</span>
+ </div>}
  <header className="topbar"><div className="brand"><span className="brand-icon"><Flame size={23}/></span><div><h1>鉄板タイマー</h1><p>TEPPAN TIMER</p></div></div><div className="top-actions"><span className={`connection ${connection}`} role="status">{connectionLabel}</span>
  {__PAGES_MODE__&&counts.running>0&&<span className={`wake-indicator ${wakeLock}`} role="status">{wakeLock==="active"?"画面を点灯中":"端末設定で消灯を延長"}</span>}
  {__PAGES_MODE__&&kitchen.updateReady&&<button className="update-button" disabled={counts.running>0} onClick={()=>kitchen.applyUpdate?.()}>{counts.running>0?"調理後に更新":"新しい版に更新"}</button>}
@@ -303,13 +419,13 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  <button className="update-button export-button undo-button" aria-label="直前の操作を取り消す" title={latestUndo?"直前の操作を取り消す":"取り消せる操作はありません"} disabled={!available||pendingIds.size>0||!latestUndo} onClick={()=>{if(latestUndo)run({operationId:createUuid(),type:"undo",expectedUndoOperationId:latestUndo.operationId});}}><Undo2 size={15}/><span>操作を取り消す</span></button>
   {!resetConfirmation
     ? <button className="update-button export-button reset-button" disabled={!snapshot||!available||pendingIds.size>0} onClick={()=>setResetConfirmation(true)}><RotateCcw size={15}/><span>リセット</span></button>
-    : <div className="reset-confirmation" role="alert"><span>鉄板・完成ボックス・実行記録・取り消し履歴を消去し、IDを1-1から再開します。{__PAGES_MODE__?"このブラウザーの調理データ":"全端末で共有する調理データ"}が対象です。{__PAGES_MODE__?"盤面を戻す場合はJSONバックアップ、記録を残す場合はCSVを先に保存してください。":"記録を残す場合は先に書き出してください。"}</span><button className="update-button reset-confirm" disabled={!available||pendingIds.size>0||resetSubmitting.current} onClick={confirmReset}>初期化を確定</button><button className="reset-cancel" disabled={pendingIds.size>0||resetSubmitting.current} onClick={()=>{if(!resetSubmitting.current)setResetConfirmation(false);}}>キャンセル</button></div>}
+    : <div className="reset-confirmation" role="alert"><span>鉄板・完成ボックス・実行記録・取り消し履歴{__PAGES_MODE__?"・生地タイマー":""}を消去し、IDを1-1から再開します。{__PAGES_MODE__?"このブラウザーの調理データ":"全端末で共有する調理データ"}が対象です。{__PAGES_MODE__?"盤面を戻す場合はJSONバックアップ、記録を残す場合はCSVを先に保存してください。":"記録を残す場合は先に書き出してください。"}</span><button className="update-button reset-confirm" disabled={!available||pendingIds.size>0||resetSubmitting.current} onClick={confirmReset}>初期化を確定</button><button className="reset-cancel" disabled={pendingIds.size>0||resetSubmitting.current} onClick={()=>{if(!resetSubmitting.current)setResetConfirmation(false);}}>キャンセル</button></div>}
   {__PAGES_MODE__&&<Dialog open={dataManagementOpen} onOpenChange={open=>{setDataManagementOpen(open);if(!open){setBackupDraft(null);setBackupReading(false);}}}>
     <DialogTrigger asChild><button className="update-button export-button data-management-trigger" aria-label="データ管理" title="データ管理" disabled={!canRestoreBoard}><Database size={15}/><span>データ管理</span></button></DialogTrigger>
     <DialogContent className="data-management-dialog">
       <DialogHeader><DialogTitle>データ管理</DialogTitle><DialogDescription>{kitchen.recoveryAvailable?"保存データを読み込めません。この画面が編集ロックを保持し、保存領域へ書き込める間だけ、検証済みJSONバックアップから復旧できます。":"データはこのスマートフォンのブラウザー内に保存されます。JSONバックアップは端末のダウンロード先に保存し、必要に応じて別の場所にも保管してください。"}</DialogDescription></DialogHeader>
       <div className="data-management-actions">
-        <button type="button" className="data-action-button" disabled={!snapshot||!available} onClick={exportBoardBackup}><Database size={18}/><span><strong>盤面バックアップを保存</strong><small>盤面・タイマー・完成ボックス・実行記録・次のIDをJSONに保存</small></span></button>
+        <button type="button" className="data-action-button" disabled={!snapshot||!available} onClick={exportBoardBackup}><Database size={18}/><span><strong>盤面バックアップを保存</strong><small>盤面・加熱と生地タイマー・完成ボックス・実行記録・次のIDをJSONに保存</small></span></button>
         <button type="button" className="data-action-button" disabled={!snapshot||!available||records.length===0} onClick={exportRecords}><Download size={18}/><span><strong>実行記録CSVを書き出す</strong><small>1記録1行。温度と区間秒数は開始順に対応。盤面の復元には使えません</small></span></button>
         <input ref={backupFileInput} className="backup-file-input" type="file" accept=".json,application/json" aria-label="JSONバックアップファイル" onChange={selectBackupFile}/>
         <button type="button" className="data-action-button" disabled={!canRestoreBoard||backupReading||pendingIds.size>0} onClick={()=>backupFileInput.current?.click()}><Download size={18}/><span><strong>{backupReading?"バックアップを確認中…":kitchen.recoveryAvailable?"JSONバックアップを選んで復旧":"JSONバックアップを選んで復元"}</strong><small>選択後に内容を確認してから、現在の保存データを置き換えます</small></span></button>
@@ -318,6 +434,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
         <h3>復元するバックアップ</h3>
         <p>作成日時：{new Date(backupDraft.exportedAt).toLocaleString("ja-JP")}</p>
         <p>読み込み後：鉄板上の楕円 {backupDraft.snapshot.items.length}枚・完成ボックス {backupDraft.snapshot.completionItems.length}個・実行記録 {backupDraft.snapshot.records.length}件</p>
+        <p>生地セット：{backupDraft.snapshot.doughBatch?`配置済み ${backupDraft.snapshot.doughBatch.placedEntityKeys.length}/${DOUGH_BATCH_SIZE}個・期限 ${localClockLabel(backupDraft.snapshot.doughBatch.deadlineAt)}`:"未開始"}</p>
         {kitchen.recoveryAvailable
           ? <p>置き換え対象：現在の保存データを読み込めません（バックアップから復旧）</p>
           : <p>置き換え対象：鉄板上の楕円 {items.length}枚・完成ボックス {completionItems.length}個・実行記録 {records.length}件</p>}
@@ -327,9 +444,9 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
     </DialogContent>
   </Dialog>}
   <Dialog open={help} onOpenChange={setHelp}><DialogTrigger asChild><button className="icon-button" aria-label="使い方"><CircleHelp size={21}/></button></DialogTrigger><DialogContent className="help-dialog"><DialogHeader><DialogTitle>鉄板タイマーの使い方</DialogTitle><DialogDescription>{__PAGES_MODE__?"調理状態は、このスマートフォンのこのブラウザー内だけに保存されます。":"同じ画面を開いたスマホで、調理の状態を共有できます。"}</DialogDescription></DialogHeader>
-  <ol className="help-list"><li>鉄板は縦2行・横3列の6マスです。新しい楕円は下段の空きマスをタップして配置します。上段は、下段から移動した楕円だけを置ける移動先専用です。</li><li>下段の待機中の楕円は、同じ鉄板・同じ列の上段が空いていればタップで上段へ移動します。上段が埋まっている場合は計測を始めます。移動できない配置の場合は元の場所に残り、理由を表示します。上段の待機中の楕円をタップすると固定90秒の計測が始まります。調理中の下段の楕円をタップすると、同じ鉄板・同じ列の真上にある空き上段マスへ移動します。移動先が使用中、または鉄板が過密の場合は移動せず、理由を表示します。上段の楕円は移動できません。</li><li>楕円の左右にある矢印をタップすると、待機中・計測中の温度を1℃ずつ変更できます。焼き上がり後は変更できません。初期値は96℃です。この温度は設定・記録用で、センサーの実測値ではありません。計測時間は常に90秒です。</li><li>残り0秒で楕円が赤くなります。赤い楕円をタップすると完成ボックスへ移り、30分の保管タイマーが始まります。期限前に完成ボックスをタップすると提供済みになり、期限後は「提供不可」として履歴に残して取り出せます。</li></ol>
-  <p className="help-note">「操作を取り消す」では直近50件までの楕円配置・鉄板上の移動を操作順に戻せます。タイマー開始、温度変更、完成ボックスへの移動、提供・提供不可の確定を行うと、それ以前の取り消し履歴は消えます。過密な旧データは位置を保って表示し、新規配置とその鉄板にある楕円の移動はできません。</p>
-  <p className="help-note">実行記録CSVはお好み焼きIDごとに1行です。「温度区間(℃・開始順)」と「区間加熱秒数(開始順)」は開始順のリストで、各位置が対応します。区切りは「 | 」で、温度不明の区間も対応する秒数と同じ位置に残ります。合計秒数と焼き上がり・保管・提供の時刻、最終ステータスも記録ごとに1回出力します。</p>
+  <ol className="help-list"><li>鉄板は縦2行・横3列の6マスです。新しい楕円は下段の空きマスをタップして配置します。上段は、下段から移動した楕円だけを置ける移動先専用です。</li><li>下段の待機中の楕円は、同じ鉄板・同じ列の上段が空いていればタップで上段へ移動します。上段が埋まっている場合は計測を始めます。移動できない配置の場合は元の場所に残り、理由を表示します。上段の待機中の楕円をタップすると固定90秒の計測が始まります。調理中の下段の楕円をタップすると、同じ鉄板・同じ列の真上にある空き上段マスへ移動します。移動先が使用中、または鉄板が過密の場合は移動せず、理由を表示します。上段の楕円は移動できません。</li>{__PAGES_MODE__&&<li>盤面から楕円を削除するには、楕円を450ミリ秒以上長押ししてから鉄板の外へドラッグし、外で離します。鉄板の上で離すと削除をキャンセルします。削除は「操作を取り消す」で元に戻せます。</li>}<li>楕円の左右にある矢印をタップすると、待機中・計測中の温度を1℃ずつ変更できます。焼き上がり後は変更できません。初期値は96℃です。この温度は設定・記録用で、センサーの実測値ではありません。計測時間は常に90秒です。</li><li>残り0秒で楕円が赤くなります。赤い楕円をタップすると完成ボックスへ移り、30分の保管タイマーが始まります。期限前に完成ボックスをタップすると提供済みになり、期限後は「提供不可」として履歴に残して取り出せます。</li>{__PAGES_MODE__&&<li>生地タイマーは「生地を取り出す」で開始する20分タイマーです。鉄板への新規配置が保存された時だけ24個の残数が減り、加熱開始や移動では減りません。20分を過ぎたら新規配置を停止し、残りを廃棄して次セットを開始します。24個を置き切った後は「生地リセット」で次セットを開始できます。90秒の加熱タイマーとは別です。</li>}</ol>
+  <p className="help-note">「操作を取り消す」では直近50件までの楕円配置・鉄板上の移動・盤外削除を操作順に戻せます。タイマー開始、温度変更、完成ボックスへの移動、提供・提供不可の確定を行うと、それ以前の取り消し履歴は消えます。過密な旧データは位置を保って表示し、新規配置とその鉄板にある楕円の移動はできません。</p>
+  <p className="help-note">実行記録CSVはお好み焼きIDごとに1行です。鉄板投入時刻は配置の保存時、下段→上段移動時刻は移動の保存時に記録します。以前のデータなど時刻を取得できない場合は空欄です。移動を取り消すと移動時刻も取り消されます。「温度区間(℃・開始順)」と「区間加熱秒数(開始順)」は開始順のリストで、各位置が対応します。区切りは「 | 」で、温度不明の区間も対応する秒数と同じ位置に残ります。合計秒数と焼き上がり・保管・提供の時刻、最終ステータスも記録ごとに1回出力します。</p>
   {__PAGES_MODE__?<>
     <p className="help-note">調理状態はこのスマートフォンのこのブラウザー内だけに保存され、PC版や別ブラウザーとは共有されません。サイトデータの削除、ブラウザー変更、端末交換で消えることがあります。定期的に「データ管理」からJSONバックアップを保存してください。CSVは完了した実行記録だけの書き出しで、盤面復元には使えません。</p>
     <p className="help-note">調理中は画面を表示してご利用ください。画面ロック中にタイマー通知やアラームを鳴らす保証はありません。新しい版の案内が表示されたら、調理を終えてから「新しい版に更新」を押してください。</p>
@@ -341,6 +458,32 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
   </div></header>
   {__PAGES_MODE__&&<p className="pages-storage-note" role="note">保存先はこのスマートフォンのこのブラウザーです。サイトデータ削除や端末交換に備え、「データ管理」からJSONバックアップを保存してください。</p>}
  <div className="overview"><p>調理状況</p><div className="totals"><span>待機 <b>{counts.blank}</b></span><span>調理中 <b>{counts.running}</b></span><span>焼き上がり <b className={counts.done?"finished-count":""}>{counts.done}</b></span><span>完成ボックス <b>{completionItems.length}</b></span></div></div>
+ {__PAGES_MODE__&&<section className={`dough-timer-card dough-${doughStatus}`} aria-label="生地タイマー">
+   <header className="dough-timer-heading"><div><h2>生地タイマー</h2><p>冷蔵庫から出した生地24個分を、20分以内に配置</p></div>{doughBatch&&<span className="dough-count">{doughPlacedCount}/{DOUGH_BATCH_SIZE}</span>}</header>
+   {doughStatus==="not_started"&&<>
+     <p className="dough-timer-message">新しい生地セットを取り出したら開始してください。開始前は新しい楕円を配置できません。</p>
+     {doughSkippedIdsMessage&&<p className="dough-timer-note" role="status">{doughSkippedIdsMessage}</p>}
+     {!canStartNextDoughBatch&&<p className="dough-timer-warning" role="status">お好み焼きIDの上限に達しているため、次の24個セットを開始できません。</p>}
+     <button type="button" className="dough-timer-button" disabled={!snapshot||!available||pendingIds.size>0||!canStartNextDoughBatch} onClick={()=>changeDoughBatch("doughStart")}>生地を取り出す</button>
+   </>}
+   {doughStatus==="active"&&doughBatch&&<div className="dough-timer-active" role="timer" aria-live="off" aria-label={`生地タイマー残り${doughRemainingLabel}、配置済み${doughPlacedCount}個、残り${DOUGH_BATCH_SIZE-doughPlacedCount}個`}>
+     <strong className="dough-clock">{doughRemainingLabel}</strong><span className="dough-clock-caption">残り時間</span>
+     <p>配置済み <b>{doughPlacedCount}/{DOUGH_BATCH_SIZE}</b> 個・残り <b>{DOUGH_BATCH_SIZE-doughPlacedCount}</b> 個</p>
+     <small>期限 {localClockLabel(doughBatch.deadlineAt)}　生地タイマーは加熱90秒とは別です。</small>
+   </div>}
+   {doughStatus==="expired"&&doughBatch&&<>
+     <div className="dough-timer-warning" role="alert"><strong>20分の期限超過 — 新規配置を停止してください</strong><p>配置済み {doughPlacedCount}/{DOUGH_BATCH_SIZE} 個。残り {DOUGH_BATCH_SIZE-doughPlacedCount} 個は廃棄してください。</p></div>
+     {expiredDoughSkipMessage&&<p className="dough-timer-note" role="status">{expiredDoughSkipMessage}</p>}
+     {!canStartNextDoughBatch&&<p className="dough-timer-warning" role="status">ID上限に達しているため次の生地セットを開始できません。</p>}
+     <button type="button" className="dough-timer-button dough-discard-button" disabled={!available||pendingIds.size>0||!canStartNextDoughBatch} onClick={()=>changeDoughBatch("doughDiscardAndStart")}>残りを廃棄して次セット開始</button>
+   </>}
+   {doughStatus==="complete"&&doughBatch&&<>
+     <p className="dough-timer-complete" role="status">配置完了　{DOUGH_BATCH_SIZE}/{DOUGH_BATCH_SIZE} 個</p>
+     {doughSkippedIdsMessage&&<p className="dough-timer-note" role="status">{doughSkippedIdsMessage}</p>}
+     {!canStartNextDoughBatch&&<p className="dough-timer-warning" role="status">お好み焼きIDの上限に達したため、次のセットは開始できません。</p>}
+     <button type="button" className="dough-timer-button" disabled={!available||pendingIds.size>0||!canStartNextDoughBatch} onClick={()=>changeDoughBatch("doughReset")}>生地リセット</button>
+   </>}
+ </section>}
  {__PAGES_MODE__&&kitchen.statusMessage&&<div className="status-banner" role="alert">{kitchen.statusMessage}</div>}
  {__PAGES_MODE__&&kitchen.recoveryAvailable&&<div className="status-banner" role="alert"><span>編集ロックを保持し、端末の保存領域へ書き込める間は、検証済みJSONバックアップから復旧できます。</span> <button className="update-button" onClick={()=>setDataManagementOpen(true)}>バックアップから復旧</button></div>}
  {gridBlocked&&<div className="grid-capacity-warning" role="status">既存の配置数が6マスを超えている鉄板があります。楕円は元の位置のまま保持しています。新規配置と超過している鉄板からの移動はできません。焼き上がった楕円を完成ボックスへ移すと数が減り、両方の鉄板が6枚以下になると残りを自動でマスへ整理します。</div>}
@@ -374,7 +517,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
   <section className="plates" aria-label="鉄板の操作画面">{([1,2] as const).map(plate=>{
     const plateItems=items.filter(i=>i.plate===plate);
     return <article className="plate-card" key={plate}><header className="plate-heading"><h2><span>0{plate}</span>鉄板 {plate}</h2><span className={plateItems.length>GRID_CELLS.length?"plate-count-overflow":""}>{plateItems.length} / {GRID_CELLS.length} マス</span></header><div className={`plate ${!available?"disabled":""}`}>
-   <svg ref={element=>{plateSvgs.current[plate]=element;}} viewBox="0 0 1600 900" role="group" aria-label={`鉄板${plate}。3列2行の6マスです。新しい楕円は下段の空きマスをタップして配置します。下段の待機中の楕円は、同じ列の上段が空いていればタップで移動し、移動後にタップすると計測を開始します。上段が使用中なら下段タップで計測を開始します。下段の調理中の楕円はタップすると同じ列の空いた上段へ移動します。上段は移動先専用で、上段からの移動、左右・同段・鉄板間の移動はできません。`} onPointerDown={e=>down(e,plate)} onPointerMove={move} onPointerUp={up} onPointerCancel={cancel} onLostPointerCapture={cancel} onContextMenu={e=>e.preventDefault()}>
+   <svg ref={element=>{plateSvgs.current[plate]=element;}} viewBox="0 0 1600 900" role="group" aria-label={`鉄板${plate}。3列2行の6マスです。新しい楕円は下段の空きマスをタップして配置します。下段の待機中の楕円は、同じ列の上段が空いていればタップで移動し、移動後にタップすると計測を開始します。上段が使用中なら下段タップで計測を開始します。下段の調理中の楕円はタップすると同じ列の空いた上段へ移動します。上段は移動先専用で、上段からの移動、左右・同段・鉄板間の移動はできません。${__PAGES_MODE__?"楕円を450ミリ秒以上長押しし、鉄板の外で離すと削除できます。鉄板上で離すとキャンセルします。":""}`} onPointerDown={e=>down(e,plate)} onPointerMove={move} onPointerUp={up} onPointerCancel={cancel} onLostPointerCapture={cancel} onContextMenu={e=>e.preventDefault()}>
    <rect width="1600" height="900" fill="transparent"/>
    <g className="plate-grid" pointerEvents="none" aria-hidden="true">
      {Array.from({length:GRID_COLUMNS-1},(_,index)=><line key={`column-${index}`} x1={(index+1)*1600/GRID_COLUMNS} y1="0" x2={(index+1)*1600/GRID_COLUMNS} y2="900"/>)}
@@ -389,12 +532,14 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      const blankMoveBlockReason=t.state==="blank"&&lowerRow&&upperCell?gridMoveBlockReason(items,item.id,item.plate,upperCell.index):null;
      const blankTapInstruction=t.state!=="blank"?"":!lowerRow?"タップで90秒の計測を開始":!upperCell?"上段の移動先を確認できません":upperCellOccupied?"上段使用中のためタップで計測開始":blankMoveBlockReason?`${gridMoveBlockMessage(blankMoveBlockReason)} 待機状態です`:"タップで上段へ移動。上段で再度タップすると計測開始";
      const timerY=cy+ry*(lowerRow?-0.68:0.68);
-     const busy=pendingIds.has(item.id);
-     return <g key={item.id} data-item-id={item.id} data-plate={plate} data-state={t.state} data-duration="90" data-temperature={item.temperature} data-version={item.version} className={`oval ${busy?"pending":""}`}>
+      const busy=pendingIds.has(item.id);
+      const longPressArmed=deleteDragCue?.entityKey===item.entityKey;
+      const deleteDragging=longPressArmed&&deleteDragCue.dragging;
+      return <g key={item.entityKey} data-item-key={item.entityKey} data-item-id={item.id} data-plate={plate} data-state={t.state} data-duration="90" data-temperature={item.temperature} data-version={item.version} className={`oval ${busy?"pending":""}${longPressArmed?" long-press-armed":""}${deleteDragging?" delete-dragging":""}`}>
        <title>{`お好み焼きID: ${item.id}`}</title>
-       <defs><clipPath id={`clip-${item.id}`}><ellipse cx={cx} cy={cy} rx={rx} ry={ry}/></clipPath></defs>
-       <ellipse role="button" tabIndex={0} aria-disabled={!available||busy} aria-label={`お好み焼きID ${item.id}、${t.state==="blank"?`待機中、温度${item.temperature}度、${blankTapInstruction}`:t.state==="done"?`焼き上がり、温度${item.temperature}度、タップで完成ボックスに移動`:lowerRow?`調理中、残り${t.remaining}秒、温度${item.temperature}度、タップで真上の空きマスへ移動`:`調理中、残り${t.remaining}秒、温度${item.temperature}度、上段からは移動できません`}`} cx={cx} cy={cy} rx={rx} ry={ry} fill={t.state==="done"?"#e13b3b":t.state==="blank"?"#fff":"#0c0d0f"} stroke={pressed===item.id?"#ffb276":"#92989f"} strokeWidth={pressed===item.id?9:4} onKeyDown={e=>keyboard(e,item)}/>
-       {t.state==="running"&&<rect x={cx-rx} y={cy-ry} width={rx*2} height={ry*2*t.progress} fill="#fff" clipPath={`url(#clip-${item.id})`} pointerEvents="none"/>}
+        <defs><clipPath id={`clip-${item.entityKey}`}><ellipse cx={cx} cy={cy} rx={rx} ry={ry}/></clipPath></defs>
+        <ellipse role="button" tabIndex={0} aria-disabled={!available||busy} aria-label={`お好み焼きID ${item.id}、${t.state==="blank"?`待機中、温度${item.temperature}度、${blankTapInstruction}`:t.state==="done"?`焼き上がり、温度${item.temperature}度、タップで完成ボックスに移動`:lowerRow?`調理中、残り${t.remaining}秒、温度${item.temperature}度、タップで真上の空きマスへ移動`:`調理中、残り${t.remaining}秒、温度${item.temperature}度、上段からは移動できません`}${__PAGES_MODE__?"。450ミリ秒以上長押しして鉄板の外で離すと削除できます。":""}`} cx={cx} cy={cy} rx={rx} ry={ry} fill={t.state==="done"?"#e13b3b":t.state==="blank"?"#fff":"#0c0d0f"} stroke={pressed===item.entityKey?"#ffb276":"#92989f"} strokeWidth={pressed===item.entityKey?9:4} onKeyDown={e=>keyboard(e,item)}/>
+        {t.state==="running"&&<rect x={cx-rx} y={cy-ry} width={rx*2} height={ry*2*t.progress} fill="#fff" clipPath={`url(#clip-${item.entityKey})`} pointerEvents="none"/>}
        {t.state!=="blank"&&<text x={cx} y={timerY} textAnchor="middle" className="oval-number" fontSize="66" fill={t.state==="done"?"#fff":t.progress>(lowerRow?0.16:0.84)?"#16191e":"#fff"} pointerEvents="none">{t.remaining}</text>}
        {t.state!=="done"&&<>
          <g role="button" tabIndex={0} aria-label="温度を1℃下げる" aria-disabled={!available||busy} data-item-action="left" className="oval-arrow" onKeyDown={e=>keyboard(e,item,"left")}>
@@ -415,7 +560,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
     <div className="plate-label-overlay" aria-hidden={!__PAGES_MODE__}>
       {plateItems.map(item=>{
         const lowerRow=nearestGridCell(item.x,item.y).row===GRID_ROWS-1;
-        return <div key={`label-${item.id}`} className={`plate-label${lowerRow?" lower":""}`} style={{left:`${item.x*100}%`}}>
+        return <div key={`label-${item.entityKey}`} className={`plate-label${lowerRow?" lower":""}`} style={{left:`${item.x*100}%`}}>
           <span className="oval-temperature">{item.temperature}℃</span>
           <span className="oval-id">{item.id}</span>
        </div>;
