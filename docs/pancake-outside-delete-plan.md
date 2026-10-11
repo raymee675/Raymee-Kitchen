@@ -1,6 +1,64 @@
 # 鉄板外への長押しドラッグ削除とID再採番計画
 
-作成日：2026年10月11日　｜　状態：実装済み。ID分離とCSVの適用範囲は利用者確認済み。
+作成日：2026年10月11日　｜　状態：初期実装済み。下記追補の表示ID不具合修正は未着手。
+
+## 追補：開始済み楕円の削除後に表示IDが詰まらない不具合
+
+状態：ver-betaでコード経路から原因を確認。CUAの長押しドラッグ制約により、ブラウザー上の盤外削除はまだ完遂できていない。実装・テストは未実施。
+
+### Objective / expected behavior
+
+鉄板上と完成ボックス上で現在利用者に表示するIDを、表示対象全体で `1-1` から連続させる。開始済み楕円を盤外削除した場合、破棄実行記録は監査・CSV用に残しながら、その記録が表示ID枠を占有しない。直後の削除Undoでは同じentityを復元し、再び表示IDを連続させる。生地消費数・配置順高水位は削除／削除Undoで戻さない。
+
+### Verified findings and constraints
+
+- `kitchen-model.ts` のdeleteは開始済み楕円の `ExecutionRecord` を作り、盤面 `items` から楕円を除く。Undoは同じentityの破棄記録を取り除いて元の楕円を戻す。この記録保持とUndoの意味は維持する。
+- 現在の `relabelEntities` は `items + records` を一つの番号集合として扱う。開始済みの2番目を削除しても、その `entityKey` の破棄recordが集合に残るため、後続の盤面楕円には `1-3` が残り、表示に抜けが出る。画面側は `Pancake.id` を楕円ラベルとして表示している。
+- `entityKey` はReact keyと領域間の照合に既に使われる。これを安定した内部関連キーとして維持し、recordと完成ボックスの対応も表示文字列でなく `entityKey` で引く。
+- 実行記録CSVは `ExecutionRecord.id` を出力する。画面表示IDと記録IDを分離し、破棄recordの保持と履歴IDの安定性を守る。既に書き出されたCSVは変更されない。
+- 現行Pages保存schemaは10（`local-kitchen-storage.ts`）。旧本文のschema 7/8は初期計画時の記述であり、今回の追補ではschema 10からの移行を扱う。
+- 手動ブラウザー検証は未完了。長押しを維持したまま楕円を盤外へドラッグして離す操作をCUAで完遂できていないため、ブラウザー再現済みとは扱わない。原因は現行モデルの集合定義から確認できる。
+
+### Revised ID model and compatibility decision
+
+- **表示ID**：`items` と `completionItems` にある現在表示中の一意なentityだけを `creationOrdinal` 順に詰めて割り当てる。盤外削除後はこの集合を再計算し、盤面と完成ボックスの両方を同時に更新する。`records` とUndo payloadだけに残るentityは表示ID集合を占有しない。
+- **記録ID**：実行記録の `id` は監査・CSV用の安定IDとし、盤面表示の再採番では変更しない。各 `Pancake` に作成時の `archiveId` を保持し、記録作成時に `ExecutionRecord.id = archiveId` とする。通常削除では再利用せず、削除Undoは同じentityのrecordだけを除去して同じ `archiveId` の楕円を復元する。最新create Undoは既存の安全条件を満たすときだけ未記録の末尾archiveIdを再利用できる。
+- **archiveIdの衝突回避**：新規作成では `nextPancakeOrdinal` 由来の `M-N` を第一候補とする。schema 10移行済みの旧記録やUndo payloadのarchiveIdと衝突する場合は、高水位を変更せず、entityKeyから決定的に導出するUUID形式へ退避する。schema 10移行時に現行entityと未開始delete-Undo payloadの旧IDが衝突する場合も、Undo payload側に同じ決定的方式を使う。strict validationはarchiveIdの形式と一意性を検証し、create Undoは作成時と同じ候補計算で末尾entityのarchiveIdを確認する。
+- 完成ボックスのカードは表示IDを示し、recordは `entityKey` で引く。CSVの既存ID列は記録IDを出力するため、現在画面の表示IDとの一致は保証しない。列名・列数は維持し、ヘルプでこの区別を説明する。過去に書き出したCSVはそのまま。
+- `nextPancakeOrdinal` は既存の生地配置順・192件上限の高水位を維持し、新規entityのarchiveId発行と衝突しないことを検証する。表示IDの空き番号を再利用してもarchiveId・entityKeyは再利用しない。表示ID枠数は現在表示中の `items + completionItems` を数え、過去recordだけを理由に新規表示枠を塞がない。
+- schema 10では未開始削除のUndo payloadが過去に再利用された表示IDを保持している場合がある。衝突するrecord/live entityの既存IDは維持し、record未作成のhistory-only entityには `entityKey` と固定seedから決まるUUID archiveIdを一度だけ割り当てる。再移行しても値は変えず、そのentityが後に記録化された場合のCSV IDにはUUIDが出る。
+
+### Affected modules and implementation ownership
+
+- `cooking-app/lib/kitchen-model.ts` — 表示ID集合を `items + completionItems` に限定し、archiveIdの割当・正規化・delete/Undo/create Undoの参照整合性を実装する。recordはentityKeyで照合する。
+- `cooking-app/lib/local-kitchen-storage.ts`、`cooking-app/lib/use-kitchen-local.ts` — schema 10から11へ移行し、盤面・completionの密な表示ID、archiveId/record IDの重複・上限・Undo参照を保存前後に検証する。JSON backup formatVersion 1は読み込み互換を保つ。
+- `cooking-app/lib/execution-record-export.ts` — CSV列構成を保ち、安定した記録IDを出力する。
+- `cooking-app/app/kitchen.tsx` — completion cardとrecordをentityKeyで結び、表示・操作・pending状態が再採番後に別entityへずれないようにする。
+- 実装担当：Solが変更範囲を統括し、モデル・保存・CSVを先に一貫して実装する。UIのファイル所有が必要になれば同一ファイルを並行編集せず、担当を分けて統合する。
+
+### Implementation steps
+
+1. `archiveId` を永続属性として型・正規化・Undo payloadに追加する。schema 10のentityごとに旧IDから一度だけarchiveIdを移行し、entityKeyで関連箇所へ同じ値を伝播する。新規作成は単調な配置高水位由来の `M-N` を候補にし、既存IDと衝突する場合はentityKey由来の決定的UUIDを使う。192上限内かつ一意であることを保存前に検証する。
+2. 表示ID割当をitemsとcompletionItemsのentityKey和集合に限定する。recordsのidとarchiveIdは変更しない。表示IDの重複・非連続と、archiveId/record IDの不正・衝突は別々の規則で検証する。
+3. `collectRecord` と盤外deleteが `archiveId` をrecordへ写す。delete Undoは対象entityKeyのrecordだけを除去し、復元後の表示IDを再計算する。削除・削除UndoではnextPancakeOrdinal、creationOrdinal、doughBatchを変えない。
+4. completion表示・record検索・pending操作でID文字列を内部関連キーとして使っている箇所をentityKeyへ置き換える。表示IDの圧縮後に古いcommandが別entityへ作用しないよう、generation/version検証を維持する。
+5. schema 10 / 既存backupの移行と現行schema 11のstrict validationを実装する。移行時に過去recordやundo payloadを失わず、表示IDだけを新しい表示集合で正規化する。
+
+### Validation and acceptance criteria
+
+- テストの追加・実行はしない。修正後はver-betaを実ブラウザーで操作し、複数楕円のうち開始済みの中間楕円を盤外削除して、残る盤面表示IDが連続すること、record/CSVの記録IDが保持されることを確認する。続けてUndoし、同じentityKey・archiveIdが復元され、盤面と完成ボックスの表示IDが連続することを確認する。
+- CUAで長押しドラッグを完遂できない場合は、その検証が未実施であると報告し、ユーザーの直接操作で同じ手順を行うための画面状態・手順を示す。コード経路を読んだだけでブラウザー再現済みとは報告しない。
+- schema 10の保存データとformatVersion 1 backupをschema 11へ読み込める。既存の盤面、実行記録、完成ボックス、Undo、生地batchを保ち、移行後の保存でarchiveId重複や表示ID抜けを許さない。
+- 表示IDは表示中の一意なentity集合で最大192件まで密である。記録IDは過去記録と衝突せず、192件上限を越えない。削除・Undoは生地消費や高水位を変えない。
+- 完了時は実施した手動ブラウザー確認だけを記録する。自動テストは実施しない。
+
+### Risks and open questions
+
+- 表示IDとCSV記録IDを別の識別子にするため、完成ボックスで見た表示番号と過去CSVの番号が異なる場合がある。本計画では履歴IDの安定性を優先し、CSV列構成を維持する。画面番号との照合が必要なら、表示時IDを別CSV列として追加する判断が必要で、その場合はCSV互換への影響を別途決める。
+- schema 10のrecord/Undo/active entity間でarchiveIdを誤って別entityへ付けると、後続recordの衝突やUndo不整合になる。移行はentityKey単位で一括検証し、失敗時に既存保存を上書きしない。
+- 手動削除のブラウザー再現はCUAの長押しドラッグ制約で未確認。修正後の受け入れには実ブラウザーでそのジェスチャーを完遂する必要がある。
+
+この追補は、以下の初期計画本文にある「items・completionItems・recordsを同じ集合で一括再採番」「将来CSVも画面表示IDへ追従」という前提を置き換える。旧本文は初期実装の記録として残す。
 
 ## 目的と確定した要件
 

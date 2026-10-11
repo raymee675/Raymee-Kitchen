@@ -25,6 +25,7 @@ export const COMPLETION_EXPIRED_REASON = "30分経過";
 
 export interface Pancake {
   id: string;
+  archiveId:string;
   entityKey: string;
   creationOrdinal: number;
   plate: 1 | 2;
@@ -44,6 +45,8 @@ export interface Pancake {
 export interface HeatingSegment { temperature: number | null; startedAt: number; endedAt: number | null }
 export interface ExecutionRecordSegment { temperature: number | null; startedAt: number; endedAt: number }
 export interface ExecutionRecord {
+  // Stable archive/CSV identifier. This is intentionally independent of the
+  // dense display ID held by Pancake and CompletionItem.
   id: string;
   entityKey: string;
   creationOrdinal: number;
@@ -68,7 +71,7 @@ export interface DoughBatchState {
   placedEntityKeys: string[];
   completedAt: number | null;
 }
-export type StoredPancake = Omit<Pancake, "temperature" | "segments" | "entityKey" | "creationOrdinal" | "griddlePlacedAt" | "movedToUpperAt"> & { temperature?: number; segments?: HeatingSegment[]; entityKey?:string; creationOrdinal?:number; griddlePlacedAt?:number|null; movedToUpperAt?:number|null };
+export type StoredPancake = Omit<Pancake, "temperature" | "segments" | "entityKey" | "creationOrdinal" | "archiveId" | "griddlePlacedAt" | "movedToUpperAt"> & { temperature?: number; segments?: HeatingSegment[]; entityKey?:string; creationOrdinal?:number; archiveId?:string; griddlePlacedAt?:number|null; movedToUpperAt?:number|null };
 type OverflowRestorePosition = { id:string; entityKey:string; creationOrdinal:number; plate:1|2; x:number; y:number };
 type OverflowPlateRestore = { positions:Array<OverflowRestorePosition>; legacyPlate?:1|2 };
 export type UndoEntry =
@@ -171,8 +174,55 @@ export function isPancakeId(value: unknown): value is string {
   return typeof value === "string" && (UUID_V4_RX.test(value) || SEQUENTIAL_ID_RX.test(value));
 }
 
+/** Archive IDs keep historical M-N values and may also be UUIDs after a collision fallback. */
+export function isArchiveId(value:unknown):value is string {
+  return isPancakeId(value);
+}
+
+/** Current on-screen labels always use the compact M-N form. */
+export function isDisplayPancakeId(value:unknown):value is string {
+  return typeof value === "string" && SEQUENTIAL_ID_RX.test(value);
+}
+
 export function isUuidV4(value: unknown): value is string {
   return typeof value === "string" && UUID_V4_RX.test(value);
+}
+
+/**
+ * Return a stable UUID-shaped archive ID when an entity's preferred archive
+ * ID is already in use. New entities normally use their M-N placement
+ * ordinal; this fallback handles legacy collisions without moving the dough
+ * high-water mark.
+ */
+function uniqueArchiveIdForEntityKey(entityKey:string, usedArchiveIds:ReadonlySet<string>):string {
+  if (isUuidV4(entityKey) && !usedArchiveIds.has(entityKey)) return entityKey;
+  for (let salt = 0; salt <= MAX_PANCAKE_IDS; salt += 1) {
+    const seed = `${entityKey}:${salt}`;
+    const hashes = [0x811c9dc5, 0x9e3779b9, 0x85ebca6b, 0xc2b2ae35];
+    for (let index = 0; index < seed.length; index += 1) {
+      const code = seed.charCodeAt(index);
+      for (let lane = 0; lane < hashes.length; lane += 1) {
+        hashes[lane] = Math.imul(hashes[lane] ^ (code + lane * 0x9e37), 0x01000193 + lane * 0x1021);
+      }
+    }
+    let hex = hashes.map(value => (value >>> 0).toString(16).padStart(8, "0")).join("");
+    hex = `${hex.slice(0, 12)}4${hex.slice(13, 16)}${(8 | (Number.parseInt(hex[16], 16) & 3)).toString(16)}${hex.slice(17)}`;
+    const archiveId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    if (!usedArchiveIds.has(archiveId)) return archiveId;
+  }
+  throw new Error("保存データのお好み焼き記録IDを一意に割り当てられません。");
+}
+
+function collectArchiveIds(
+  items:readonly Pancake[],
+  records:readonly ExecutionRecord[],
+  undoHistory:readonly UndoEntry[],
+):Set<string> {
+  return new Set([
+    ...items.map(item => item.archiveId),
+    ...records.map(record => record.id),
+    ...undoHistory.flatMap(entry => entry.type === "delete" ? [entry.pancake.archiveId] : []),
+  ]);
 }
 
 function legacyEntityKey(id:string):string {
@@ -259,6 +309,7 @@ export function normalizePancake(item: StoredPancake): Pancake {
   }
   return {
     ...item,
+    archiveId:isArchiveId(item.archiveId) ? item.archiveId : item.id,
     entityKey:entityKeyFor(item.id, item.entityKey),
     creationOrdinal:creationOrdinalFor(item.id, item.creationOrdinal),
     duration: TIMER_DURATION,
@@ -281,7 +332,7 @@ export function normalizeExecutionRecords(value: unknown): ExecutionRecord[] {
     return value.map(record => {
     if (!record || typeof record !== "object" || Array.isArray(record)) throw new Error("保存データの実行記録が正しくありません。");
     const candidate = record as Record<string, unknown>;
-    if (!isPancakeId(candidate.id) || !Number.isFinite(candidate.startedAt) || !Number.isFinite(candidate.collectedAt)
+    if (!isArchiveId(candidate.id) || !Number.isFinite(candidate.startedAt) || !Number.isFinite(candidate.collectedAt)
       || (candidate.collectedAt as number) < (candidate.startedAt as number) || !Array.isArray(candidate.segments) || candidate.segments.length === 0) {
       throw new Error("保存データの実行記録が正しくありません。");
     }
@@ -500,7 +551,7 @@ function assignEntityOrdinals(
 
 function relabelEntities(items:Pancake[], records:ExecutionRecord[], completionItems:CompletionItem[], undoHistory:UndoEntry[]) {
   const entityByKey = new Map<string, {id:string; creationOrdinal:number}>();
-  for (const entity of [...items, ...records]) {
+  for (const entity of [...items, ...completionItems]) {
     if (!isEntityKey(entity.entityKey) || !Number.isSafeInteger(entity.creationOrdinal) || entity.creationOrdinal < 1
       || entityByKey.has(entity.entityKey)) {
       throw new Error("保存データのお好み焼き内部IDまたは関連付けが正しくありません。");
@@ -519,9 +570,17 @@ function relabelEntities(items:Pancake[], records:ExecutionRecord[], completionI
   const idByKey = new Map<string, string>();
   entities.forEach(([entityKey], index) => idByKey.set(entityKey, pancakeIdForOrdinal(index + 1)));
   for (const item of completionItems) {
-    if (!entityByKey.has(item.entityKey)) throw new Error("完成ボックスのお好み焼き内部IDを実行記録から照合できません。");
+    if (!records.some(record => record.entityKey === item.entityKey)) throw new Error("完成ボックスのお好み焼き内部IDを実行記録から照合できません。");
   }
-  const changed = [...items, ...records, ...completionItems].some(entity => entity.id !== idByKey.get(entity.entityKey));
+  const changed = [...items, ...completionItems].some(entity => entity.id !== idByKey.get(entity.entityKey))
+    || undoHistory.some(entry => {
+      const expected = idByKey.get(entry.entityKey);
+      if (expected && entry.id !== expected) return true;
+      return entry.type === "move" && entry.overflowPlateRestore?.positions.some(position => {
+        const expectedPositionId = idByKey.get(position.entityKey);
+        return expectedPositionId !== undefined && expectedPositionId !== position.id;
+      }) === true;
+    });
   const relabel = <T extends {id:string; entityKey:string}>(entity:T):T => {
     const id = idByKey.get(entity.entityKey);
     if (!id) return entity;
@@ -542,10 +601,75 @@ function relabelEntities(items:Pancake[], records:ExecutionRecord[], completionI
   return {
     changed,
     items:items.map(relabel),
-    records:records.map(relabel),
+    records,
     completionItems:completionItems.map(relabel),
     undoHistory:normalizedUndo,
   };
+}
+
+function assignArchiveIds(
+  items:Pancake[],
+  records:ExecutionRecord[],
+  completionItems:CompletionItem[],
+  undoHistory:UndoEntry[],
+  strictArchiveIds:boolean,
+) {
+  const archiveIdByKey = new Map<string,string>();
+  const entityByArchiveId = new Map<string,string>();
+  const register = (entityKey:string, archiveId:string, authoritative:boolean, resolveLegacyCollision = false) => {
+    if (!isEntityKey(entityKey) || !isArchiveId(archiveId)) {
+      throw new Error("保存データのお好み焼き記録IDが正しくありません。");
+    }
+    const current = archiveIdByKey.get(entityKey);
+    if (current !== undefined) {
+      if (current !== archiveId && (strictArchiveIds || authoritative)) {
+        throw new Error("保存データで同じお好み焼きの記録IDが一致しません。");
+      }
+      if (authoritative) archiveIdByKey.set(entityKey, archiveId);
+      return;
+    }
+    const previousEntityKey = entityByArchiveId.get(archiveId);
+    if (previousEntityKey !== undefined && previousEntityKey !== entityKey) {
+      // Before schema 11, an unstarted deleted oval had no execution record.
+      // Its Undo payload could retain an ID later reused by another visible
+      // entity, so give only that history-only entity a deterministic archive
+      // ID while preserving all existing record and live-entity IDs.
+      if (strictArchiveIds || authoritative || !resolveLegacyCollision) throw new Error("保存データに重複したお好み焼き記録IDがあります。");
+      archiveId = uniqueArchiveIdForEntityKey(entityKey, new Set(entityByArchiveId.keys()));
+    }
+    archiveIdByKey.set(entityKey, archiveId);
+    entityByArchiveId.set(archiveId, entityKey);
+  };
+
+  // A record's ID is the source of truth when migrating schema 10, because
+  // its historical CSV value must survive display-ID compaction.
+  for (const record of records) register(record.entityKey, record.id, true);
+  for (const item of items) register(item.entityKey, item.archiveId, false);
+  for (const item of completionItems) {
+    if (!archiveIdByKey.has(item.entityKey)) throw new Error("完成ボックスのお好み焼き記録IDを照合できません。");
+  }
+  for (const entry of undoHistory) {
+    if (entry.type === "delete") register(entry.pancake.entityKey, entry.pancake.archiveId, false, true);
+  }
+  for (const entry of undoHistory) {
+    if (entry.type !== "delete" && !archiveIdByKey.has(entry.entityKey)) {
+      throw new Error("操作取り消しのお好み焼き記録IDを照合できません。");
+    }
+  }
+
+  if (archiveIdByKey.size > MAX_PANCAKE_IDS) {
+    throw new KitchenError("id_capacity", "保存データに記録ID上限（192個）を超えるお好み焼きがあります。保存データは変更していません。");
+  }
+
+  const withArchiveId = <T extends {entityKey:string; archiveId:string}>(entity:T):T => {
+    const archiveId = archiveIdByKey.get(entity.entityKey);
+    if (!archiveId) throw new Error("保存データのお好み焼き記録IDを解決できません。");
+    return {...entity, archiveId};
+  };
+  const normalizedUndo = undoHistory.map(entry => entry.type === "delete"
+    ? {...entry, pancake:withArchiveId(entry.pancake)}
+    : entry);
+  return {items:items.map(withArchiveId), records, completionItems, undoHistory:normalizedUndo};
 }
 
 function validateStrictEntityMetadata(input:{
@@ -555,6 +679,7 @@ function validateStrictEntityMetadata(input:{
   undoHistory?:unknown;
   doughBatch?:unknown;
   nextCreationOrdinal?:unknown;
+  strictArchiveIds?:boolean;
 }):void {
   const isObject = (value:unknown):value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
   const validEntity = (value:unknown) => isObject(value)
@@ -567,6 +692,11 @@ function validateStrictEntityMetadata(input:{
     || !Array.isArray(input.completionItems) || !input.completionItems.every(validEntity)
     || !Array.isArray(input.undoHistory)) {
     throw new Error("schema 8の内部ID情報が不足しています。");
+  }
+  if (input.strictArchiveIds && (!input.items.every(item => isArchiveId(item.archiveId))
+    || !Array.isArray(input.undoHistory) || !input.undoHistory.every(entry => !isObject(entry) || entry.type !== "delete"
+      || (isObject(entry.pancake) && isArchiveId(entry.pancake.archiveId))))) {
+    throw new Error("schema 11のお好み焼き記録IDが不足しています。");
   }
   for (const entry of input.undoHistory) {
     if (!validEntity(entry)) throw new Error("schema 8の操作取り消し内部IDが不足しています。");
@@ -888,9 +1018,8 @@ function normalizeUndoHistory(value: unknown, records: readonly ExecutionRecord[
 }
 
 /**
- * Canonicalize a saved board and migrate live legacy UUIDs to placement-order
- * IDs. Completed historical records keep their old IDs unless they still
- * belong to a pancake currently waiting in the completion box.
+ * Canonicalize a saved board. Display IDs are dense across active items and
+ * completion cards; execution record IDs remain stable archive IDs.
  */
 export function normalizeBoardData(input: {
   items: readonly StoredPancake[];
@@ -904,8 +1033,9 @@ export function normalizeBoardData(input: {
   doughBatchSize?:number;
   strictPublicIds?:boolean;
   strictEntityMetadata?:boolean;
+  strictArchiveIds?:boolean;
 }): NormalizedBoardData {
-  if (input.strictEntityMetadata) validateStrictEntityMetadata(input);
+  if (input.strictEntityMetadata) validateStrictEntityMetadata({...input, strictArchiveIds:input.strictArchiveIds});
   const generation = input.generation === undefined ? INITIAL_BOARD_GENERATION : input.generation;
   if (!Number.isSafeInteger(generation) || (generation as number) < INITIAL_BOARD_GENERATION) {
     throw new Error("保存データの盤面世代が正しくありません。");
@@ -914,9 +1044,18 @@ export function normalizeBoardData(input: {
   const initialCompletion = normalizeCompletionItems(input.completionItems, records);
   let items = normalizePancakes(input.items);
   const originalIds = [
-    ...items.map(item => item.id),
+    ...items.map(item => item.archiveId),
     ...records.map(record => record.id),
-    ...initialCompletion.map(item => item.id),
+    ...(Array.isArray(input.undoHistory) ? input.undoHistory.flatMap((entry:unknown) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+      const candidate = entry as Record<string,unknown>;
+      const pancake = candidate.type === "delete" && candidate.pancake && typeof candidate.pancake === "object"
+        ? candidate.pancake as Record<string,unknown>
+        : null;
+      if (!pancake) return [];
+      const archiveId = isArchiveId(pancake.archiveId) ? pancake.archiveId : pancake.id;
+      return isArchiveId(archiveId) ? [archiveId] : [];
+    }) : []),
   ];
   const greatestSavedOrdinal = originalIds.reduce((greatest, id) => Math.max(greatest, pancakeOrdinalForId(id) ?? 0), 0);
   const hasIdentityMetadata = (value:unknown):boolean => typeof value === "object" && value !== null && !Array.isArray(value)
@@ -950,9 +1089,14 @@ export function normalizeBoardData(input: {
   const normalizedRecords = assigned.records;
   const normalizedCompletion = assigned.completionItems;
   const normalizedUndo = assigned.undoHistory;
-  validateUndoEntityReferences(items, normalizedRecords, normalizedCompletion, normalizedUndo);
-  const dense = relabelEntities(items, normalizedRecords, normalizedCompletion, normalizedUndo);
-  if (input.strictPublicIds && dense.changed) throw new Error("保存データの公開IDが連続していません。");
+  const archived = assignArchiveIds(items, normalizedRecords, normalizedCompletion, normalizedUndo, input.strictArchiveIds ?? false);
+  validateUndoEntityReferences(archived.items, archived.records, archived.completionItems, archived.undoHistory);
+  const dense = relabelEntities(archived.items, archived.records, archived.completionItems, archived.undoHistory);
+  if (input.strictPublicIds && (dense.changed
+    || !dense.items.every(item => isDisplayPancakeId(item.id))
+    || !dense.completionItems.every(item => isDisplayPancakeId(item.id)))) {
+    throw new Error("保存データの公開IDが連続していません。");
+  }
   const doughBatch = normalizeDoughBatch(input.doughBatch, nextPancakeOrdinal, input.doughBatchSize);
   return {
     generation:generation as number,
@@ -1220,7 +1364,15 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
       const remainingRecords = records.filter(record => record.entityKey !== latest.entityKey);
       const remainingCompletionItems = completionItems.filter(item => item.entityKey !== latest.entityKey);
       const canReuseCreationOrdinal = target.creationOrdinal === board.nextCreationOrdinal - 1;
-      const canReusePlacementOrdinal = board.nextPancakeOrdinal > INITIAL_PANCAKE_ORDINAL;
+      const canReusePlacementOrdinal = (() => {
+        if (board.nextPancakeOrdinal <= INITIAL_PANCAKE_ORDINAL) return false;
+        const usedArchiveIds = collectArchiveIds(remainingItems, remainingRecords, remainingHistory);
+        const candidate = pancakeIdForOrdinal(board.nextPancakeOrdinal - 1);
+        const expectedArchiveId = usedArchiveIds.has(candidate)
+          ? uniqueArchiveIdForEntityKey(latest.entityKey, usedArchiveIds)
+          : candidate;
+        return target.archiveId === expectedArchiveId;
+      })();
       if (!canReuseCreationOrdinal || !canReusePlacementOrdinal) {
         throw new KitchenError("undo_conflict", "この配置の作成順を安全に戻せないため、操作を取り消せません。");
       }
@@ -1349,18 +1501,23 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
     }
     requireGridCapacity(canonicalItems);
     if (isGridCellOccupied(canonicalItems, command.plate, position.index)) throw new KitchenError("cell_occupied", "このマスにはすでに楕円があります。空いているマスをタップしてください。");
-    const currentEntityCount = new Set([...canonicalItems, ...records].map(entity => entity.entityKey)).size;
+    const currentEntityCount = new Set([...canonicalItems, ...completionItems].map(entity => entity.entityKey)).size;
     if (currentEntityCount >= MAX_PANCAKE_IDS) {
-      throw new KitchenError("id_capacity", "保存中のお好み焼きが表示上限（192個）に達しています。記録を確認してください。");
+      throw new KitchenError("id_capacity", "画面に表示中のお好み焼きが表示上限（192個）に達しています。");
     }
     if (board.nextPancakeOrdinal > MAX_PANCAKE_IDS || board.nextCreationOrdinal >= Number.MAX_SAFE_INTEGER) {
       throw new KitchenError("id_capacity", "お好み焼きの配置上限（192個）に達しました。新しい楕円を配置できません。");
     }
     const entityKey = command.operationId;
     const creationOrdinal = board.nextCreationOrdinal;
+    const usedArchiveIds = collectArchiveIds(canonicalItems, records, undoHistory);
+    const archiveIdCandidate = pancakeIdForOrdinal(board.nextPancakeOrdinal);
+    const archiveId = usedArchiveIds.has(archiveIdCandidate)
+      ? uniqueArchiveIdForEntityKey(entityKey, usedArchiveIds)
+      : archiveIdCandidate;
     const id = pancakeIdForOrdinal(currentEntityCount + 1);
     const entry:UndoEntry = {operationId:command.operationId, type:"create", id, entityKey, creationOrdinal};
-    const created:Pancake = {id, entityKey, creationOrdinal, plate:command.plate, x:position.x, y:position.y, griddlePlacedAt:now, movedToUpperAt:null, duration:TIMER_DURATION, temperature:DEFAULT_TEMPERATURE, startedAt:null, segments:[], version:1};
+    const created:Pancake = {id, archiveId, entityKey, creationOrdinal, plate:command.plate, x:position.x, y:position.y, griddlePlacedAt:now, movedToUpperAt:null, duration:TIMER_DURATION, temperature:DEFAULT_TEMPERATURE, startedAt:null, segments:[], version:1};
     return normalizeChangedBoard({...base, items:[...canonicalItems, created], records, completionItems, nextPancakeOrdinal:board.nextPancakeOrdinal + 1, nextCreationOrdinal:board.nextCreationOrdinal + 1, undoHistory:pushUndoEntry(undoHistory, entry), ...(doughTracked ? {doughBatch:nextDoughBatch} : {})});
   }
   if (command.type === "remove") {
@@ -1483,7 +1640,7 @@ function collectRecord(item: Pancake, now: number): ExecutionRecord {
   ];
   const cookCompletedAt = item.startedAt + TIMER_DURATION * 1000;
   return {
-    id:item.id,
+    id:item.archiveId,
     entityKey:item.entityKey,
     creationOrdinal:item.creationOrdinal,
     griddlePlacedAt:item.griddlePlacedAt,

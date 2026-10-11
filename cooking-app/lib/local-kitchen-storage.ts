@@ -1,10 +1,10 @@
-import { DOUGH_ID_BLOCK_SIZE, INITIAL_BOARD_GENERATION, LEGACY_OVAL_RX, LEGACY_OVAL_RY, isPancakeId, normalizeBoardData, type CompletionItem, type DoughBatchState, type ExecutionRecord, type Pancake, type Snapshot, type StoredPancake, type UndoEntry } from "./kitchen-model";
+import { DOUGH_ID_BLOCK_SIZE, INITIAL_BOARD_GENERATION, LEGACY_OVAL_RX, LEGACY_OVAL_RY, isArchiveId, isPancakeId, normalizeBoardData, type CompletionItem, type DoughBatchState, type ExecutionRecord, type Pancake, type Snapshot, type StoredPancake, type UndoEntry } from "./kitchen-model";
 
 const siteSegment = typeof window === "undefined"
   ? "root"
   : encodeURIComponent(window.location.pathname.split("/").filter(Boolean)[0] ?? "root");
 export const LOCAL_BOARD_KEY = `teppan-timer:${siteSegment}:single-phone-board:v1`;
-export const LOCAL_BOARD_SCHEMA = 10;
+export const LOCAL_BOARD_SCHEMA = 11;
 export const LOCAL_BACKUP_FORMAT = "teppan-timer-pages-board";
 export const LOCAL_BACKUP_FORMAT_VERSION = 1;
 
@@ -40,6 +40,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function validItem(value: unknown): value is StoredPancake {
   if (!isRecord(value)) return false;
   return isPancakeId(value.id)
+    && (value.archiveId === undefined || isArchiveId(value.archiveId))
     && (value.plate === 1 || value.plate === 2)
     && typeof value.x === "number" && Number.isFinite(value.x) && value.x >= LEGACY_OVAL_RX + 0.02 && value.x <= 1 - LEGACY_OVAL_RX - 0.02
     && typeof value.y === "number" && Number.isFinite(value.y) && value.y >= LEGACY_OVAL_RY + 0.02 && value.y <= 1 - LEGACY_OVAL_RY - 0.02
@@ -93,7 +94,7 @@ function decode(raw: string | null): StoredBoard {
     ids.add(item.id);
   }
 
-  const legacyDoughSchema = schemaVersion >= 7 && schemaVersion < LOCAL_BOARD_SCHEMA;
+  const legacyDoughSchema = schemaVersion >= 7 && schemaVersion < 10;
   const board = normalizeBoardData({
     items:rawItems,
     records:rawRecords,
@@ -105,7 +106,8 @@ function decode(raw: string | null): StoredBoard {
     doughBatch:schemaVersion >= 7 ? (value as Record<string, unknown>).doughBatch : null,
     doughBatchSize:legacyDoughSchema ? DOUGH_ID_BLOCK_SIZE : undefined,
     strictEntityMetadata:schemaVersion >= 8,
-    strictPublicIds:schemaVersion >= 8,
+    strictPublicIds:schemaVersion >= LOCAL_BOARD_SCHEMA,
+    strictArchiveIds:schemaVersion >= LOCAL_BOARD_SCHEMA,
   });
   let doughBatch = board.doughBatch ?? null;
   if (legacyDoughSchema && doughBatch) {
@@ -136,6 +138,7 @@ function toStoredBoard(snapshot: Snapshot): StoredBoard {
     doughBatch:snapshot.doughBatch ?? null,
     strictEntityMetadata:true,
     strictPublicIds:true,
+    strictArchiveIds:true,
   });
   return {
     schemaVersion: LOCAL_BOARD_SCHEMA,
@@ -226,7 +229,7 @@ export function resetUnreadableLegacyDoughBoard(expectedRaw: string, storage: Pi
     throw new Error("旧生地タイマーの保存状態を確認できません。データは変更していません。");
   }
   if (!isRecord(rawBoard)
-    || !Number.isSafeInteger(rawBoard.schemaVersion) || (rawBoard.schemaVersion as number) < 7 || (rawBoard.schemaVersion as number) >= LOCAL_BOARD_SCHEMA
+    || !Number.isSafeInteger(rawBoard.schemaVersion) || (rawBoard.schemaVersion as number) < 7 || (rawBoard.schemaVersion as number) >= 10
     || !isRecord(rawBoard.doughBatch)
     || !Array.isArray(rawBoard.doughBatch.placedEntityKeys) && !Array.isArray(rawBoard.doughBatch.placedIds)) {
     throw new Error("旧生地タイマーの保存状態を確認できません。データは変更していません。");

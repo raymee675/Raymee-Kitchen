@@ -208,10 +208,13 @@ export function useKitchenLocal() {
     if (legacyDoughResetRequired) throw new Error("旧24個タイマーの未完了セットがあります。全体リセットが必要です。");
     if (!activeEditor.current || !state.current) throw new Error("保存画面の準備ができていません。画面を開き直してください。");
     const command = parseCommand({...input, expectedGeneration:input.expectedGeneration ?? state.current.generation});
-    const pendingKey = command.type === "create" || command.type === "undo" || command.type === "reset"
-      || command.type === "doughStart" || command.type === "doughReset" || command.type === "doughDiscardAndStart"
+    const targetEntityKey = command.type === "create"
       ? command.operationId
-      : command.id;
+      : "id" in command
+        ? state.current.items.find(item => item.id === command.id)?.entityKey
+          ?? state.current.completionItems.find(item => item.id === command.id)?.entityKey
+        : undefined;
+    const pendingKey = targetEntityKey ?? command.operationId;
     if (pending.current.has(pendingKey)) throw new Error("このお好み焼きは操作中です。");
 
     pending.current.add(pendingKey);

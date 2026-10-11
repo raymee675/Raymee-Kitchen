@@ -1,4 +1,4 @@
-import { COMPLETION_EXPIRED_REASON, LEGACY_SERVICE_OUTCOME, PLATE_DISCARD_REASON, completionStatus, isPancakeId, type ExecutionRecord } from "./kitchen-model";
+import { COMPLETION_EXPIRED_REASON, LEGACY_SERVICE_OUTCOME, PLATE_DISCARD_REASON, completionStatus, isArchiveId, type ExecutionRecord } from "./kitchen-model";
 
 const headers = [
   "お好み焼きID", "鉄板投入時刻", "下段→上段移動時刻", "タイマー開始時刻", "回収時刻", "温度区間(℃・開始順)", "区間加熱秒数(開始順)", "合計加熱秒数",
@@ -20,13 +20,15 @@ function csvField(value: string | number): string {
 }
 
 function excelTextId(value: string): string {
-  if (!isPancakeId(value)) throw new Error("実行記録のお好み焼きIDが正しくありません。");
+  if (!isArchiveId(value)) throw new Error("実行記録のお好み焼きIDが正しくありません。");
   // A fixed formula makes Excel keep values such as 1-1 as text. The ID
   // allowlist prevents user-controlled formula content inside this wrapper.
   return `="${value}"`;
 }
 
 export function executionRecordsToCsv(records: readonly ExecutionRecord[], now = Date.now()): string {
+  // Keep the existing CSV ID column bound to the stable record/archive ID;
+  // display IDs can be compacted independently after a plate deletion.
   const orderedRecords = [...records].sort((a, b) => a.creationOrdinal - b.creationOrdinal);
   const lines = [headers, ...orderedRecords.map(record => {
     const totalMilliseconds = record.segments.reduce((total, segment) => total + segment.endedAt - segment.startedAt, 0);

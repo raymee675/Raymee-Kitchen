@@ -131,17 +131,18 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    : snapshot ? nextDoughBatchFirstOrdinal(snapshot.nextPancakeOrdinal) : null;
  const canStartNextDoughBatch = nextDoughFirstOrdinal !== null && nextDoughFirstOrdinal + DOUGH_TIMER_BATCH_SIZE - 1 <= MAX_PANCAKE_IDS;
  const doughSkippedIdsMessage = doughStatus!=="expired"&&snapshot && nextDoughFirstOrdinal !== null && nextDoughFirstOrdinal > snapshot.nextPancakeOrdinal
-   ? `未使用ID ${pancakeOrdinalLabel(snapshot.nextPancakeOrdinal)}〜${pancakeOrdinalLabel(nextDoughFirstOrdinal - 1)} は飛ばし、${pancakeOrdinalLabel(nextDoughFirstOrdinal)}から6個分を割り当てます。${DOUGH_ID_BLOCK_SIZE}個のID区間は6個ずつ${DOUGH_ID_BLOCK_SIZE / DOUGH_TIMER_BATCH_SIZE}回で使い切ります。`
+   ? `未使用の記録ID ${pancakeOrdinalLabel(snapshot.nextPancakeOrdinal)}〜${pancakeOrdinalLabel(nextDoughFirstOrdinal - 1)} は飛ばし、記録ID ${pancakeOrdinalLabel(nextDoughFirstOrdinal)}から6個分を割り当てます。${DOUGH_ID_BLOCK_SIZE}個の記録ID区間は6個ずつ${DOUGH_ID_BLOCK_SIZE / DOUGH_TIMER_BATCH_SIZE}回で使い切ります。`
    : null;
  const expiredDoughSkipMessage = doughStatus==="expired"&&doughBatch
    ? nextDoughFirstOrdinal!==null&&nextDoughFirstOrdinal<=MAX_PANCAKE_IDS
-     ? `期限切れ区間のID ${pancakeOrdinalLabel(doughBatch.firstPancakeOrdinal)}〜${pancakeOrdinalLabel(doughBatch.firstPancakeOrdinal+DOUGH_TIMER_BATCH_SIZE-1)} は再利用せず、${pancakeOrdinalLabel(nextDoughFirstOrdinal)}から次の${DOUGH_TIMER_BATCH_SIZE}個分を割り当てます。`
-     : `期限切れ区間のID ${pancakeOrdinalLabel(doughBatch.firstPancakeOrdinal)}〜${pancakeOrdinalLabel(doughBatch.firstPancakeOrdinal+DOUGH_TIMER_BATCH_SIZE-1)} は再利用せず、次の${DOUGH_TIMER_BATCH_SIZE}個分はID上限のため開始できません。`
+     ? `期限切れ区間の記録ID ${pancakeOrdinalLabel(doughBatch.firstPancakeOrdinal)}〜${pancakeOrdinalLabel(doughBatch.firstPancakeOrdinal+DOUGH_TIMER_BATCH_SIZE-1)} は再利用せず、記録ID ${pancakeOrdinalLabel(nextDoughFirstOrdinal)}から次の${DOUGH_TIMER_BATCH_SIZE}個分を割り当てます。`
+     : `期限切れ区間の記録ID ${pancakeOrdinalLabel(doughBatch.firstPancakeOrdinal)}〜${pancakeOrdinalLabel(doughBatch.firstPancakeOrdinal+DOUGH_TIMER_BATCH_SIZE-1)} は再利用せず、次の${DOUGH_TIMER_BATCH_SIZE}個分は記録ID上限のため開始できません。`
    : null;
  const counts = {blank:0,running:0,done:0};
  items.forEach(item=>counts[timer(item,now).state]++);
   const records = snapshot?.records ?? [];
-  const recordsById = new Map(records.map(record=>[record.id,record]));
+  const recordsByEntityKey = new Map(records.map(record=>[record.entityKey,record]));
+  const isItemPending=(item:{id:string;entityKey:string})=>pendingIds.has(__PAGES_MODE__?item.entityKey:item.id);
   const wakeLock=useScreenWakeLock(__PAGES_MODE__&&counts.running>0);
 
  useEffect(()=>{
@@ -165,6 +166,9 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  },[]);
 
  const run = (command:Command) => {
+   const targetEntityKey = command.type === "remove"
+     ? completionItems.find(item=>item.id===command.id)?.entityKey ?? items.find(item=>item.id===command.id)?.entityKey
+     : undefined;
    let operation:Promise<Snapshot>;
    try { operation=send(command); }
    catch(error) { toast.error(error instanceof Error?error.message:"操作を保存できませんでした。"); return; }
@@ -172,14 +176,14 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    if(command.type==="adjust") { const item=result.items.find(i=>i.id===command.id); if(item) toast.success(`温度を${item.temperature}℃に変更しました。`,{duration:1800}); }
    else if(command.type==="move") { const item=result.items.find(i=>i.id===command.id); if(item) toast.success("真上のマスへ移動しました。",{duration:1800}); }
    else if(command.type==="remove") {
-     const record=result.records.find(item=>item.id===command.id);
-     if(result.completionItems.some(item=>item.id===command.id)) toast.success("完成ボックスに移しました。",{duration:1800});
+     const record=targetEntityKey ? result.records.find(item=>item.entityKey===targetEntityKey) : undefined;
+     if(targetEntityKey && result.completionItems.some(item=>item.entityKey===targetEntityKey)) toast.success("完成ボックスに移しました。",{duration:1800});
      else if(record?.servedAt!==null&&record?.servedAt!==undefined) toast.success("提供済みにしました。",{duration:1800});
      else if(record?.unavailableAt!==null&&record?.unavailableAt!==undefined) toast.success("提供不可として記録しました。",{duration:1800});
    }
    else if(command.type==="undo") toast.success("直前の操作を取り消しました。",{duration:1800});
     else if(command.type==="delete") toast.success("楕円を削除しました。必要なら「操作を取り消す」で戻せます。",{duration:2200});
-   else if(command.type==="doughStart") toast.success(`生地タイマーを開始しました。ID ${pancakeOrdinalLabel(result.doughBatch?.firstPancakeOrdinal ?? 1)}から6個分の20分です。`,{duration:2400});
+   else if(command.type==="doughStart") toast.success(`生地タイマーを開始しました。記録ID ${pancakeOrdinalLabel(result.doughBatch?.firstPancakeOrdinal ?? 1)}から6個分の20分です。`,{duration:2400});
    else if(command.type==="doughReset") toast.success("次の6個分の生地タイマーを開始しました。",{duration:2000});
    else if(command.type==="doughDiscardAndStart") toast.success("残りを廃棄し、次の6個分の生地タイマーを開始しました。",{duration:2400});
  }).catch(()=>{}); };
@@ -303,7 +307,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    if(controller.connection!=="online"||controller.backupBusy||latest?.generation!==current.expectedGeneration
      ||(latest?.doughBatch?.batchId??null)!==current.expectedDoughBatchId
      ||latest?.nextPancakeOrdinal!==current.expectedNextPancakeOrdinal
-     ||!item||item.id!==current.itemId||item.version!==current.itemVersion||controller.pendingIds.has(item.id))return false;
+     ||!item||item.id!==current.itemId||item.version!==current.itemVersion||(__PAGES_MODE__?controller.pendingIds.has(item.entityKey):controller.pendingIds.has(item.id)))return false;
    current.longPressArmed=true;
    setDeleteDragCue({entityKey:current.itemEntityKey,dragging:false,outside:false});
    return true;
@@ -335,7 +339,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    const element = event.target as Element;
    const target = element.closest("[data-item-key]");
    const item = items.find(i=>i.entityKey===target?.getAttribute("data-item-key")) ?? null;
-   if (item && pendingIds.has(item.id)) return;
+   if (item && isItemPending(item)) return;
    const action = element.closest("[data-item-action]")?.getAttribute("data-item-action");
    const bounds=event.currentTarget.getBoundingClientRect();
    const targetX=(event.clientX-bounds.left)/bounds.width,targetY=(event.clientY-bounds.top)/bounds.height;
@@ -408,7 +412,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    contact.current=null; clearHoldTimer(c); setPressed(null); setDeleteDragCue(null);
  }
  function keyboard(event:KeyboardEvent<SVGElement>,item:Pancake,controlAction?:"left"|"right") {
-   if(!available||pendingIds.has(item.id))return;
+   if(!available||isItemPending(item))return;
    const action=controlAction
      ? (event.key==="Enter"||event.key===" "?controlAction:undefined)
      : ({"Enter":"tap"," ":"tap","ArrowLeft":"left","ArrowRight":"right","ArrowUp":"up","Delete":"up"} as Record<string,string>)[event.key];
@@ -461,7 +465,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
   <Dialog open={help} onOpenChange={setHelp}><DialogTrigger asChild><button className="icon-button" aria-label="使い方"><CircleHelp size={21}/></button></DialogTrigger><DialogContent className="help-dialog"><DialogHeader><DialogTitle>鉄板タイマーの使い方</DialogTitle><DialogDescription>{__PAGES_MODE__?"調理状態は、このスマートフォンのこのブラウザー内だけに保存されます。":"同じ画面を開いたスマホで、調理の状態を共有できます。"}</DialogDescription></DialogHeader>
   <ol className="help-list"><li>鉄板は縦2行・横3列の6マスです。新しい楕円は下段の空きマスをタップして配置します。上段は、下段から移動した楕円だけを置ける移動先専用です。</li><li>下段の待機中の楕円は、同じ鉄板・同じ列の上段が空いていればタップで上段へ移動します。上段が埋まっている場合は計測を始めます。移動できない配置の場合は元の場所に残り、理由を表示します。上段の待機中の楕円をタップすると固定90秒の計測が始まります。調理中の下段の楕円をタップすると、同じ鉄板・同じ列の真上にある空き上段マスへ移動します。移動先が使用中、または鉄板が過密の場合は移動せず、理由を表示します。上段の楕円は移動できません。</li>{__PAGES_MODE__&&<li>盤面から楕円を削除するには、楕円を450ミリ秒以上長押ししてから鉄板の外へドラッグし、外で離します。鉄板の上で離すと削除をキャンセルします。削除は「操作を取り消す」で元に戻せます。</li>}<li>楕円の左右にある矢印をタップすると、待機中・計測中の温度を1℃ずつ変更できます。焼き上がり後は変更できません。初期値は96℃です。この温度は設定・記録用で、センサーの実測値ではありません。計測時間は常に90秒です。</li><li>残り0秒で楕円が赤くなります。赤い楕円をタップすると完成ボックスへ移り、30分の保管タイマーが始まります。期限前に完成ボックスをタップすると提供済みになり、期限後は「提供不可」として履歴に残して取り出せます。</li>{__PAGES_MODE__&&<li>生地タイマーは「生地を取り出す」で開始する20分タイマーです。鉄板への新規配置が保存された時だけ6個の残数が減り、加熱開始や移動では減りません。20分を過ぎたら新規配置を停止し、残りを廃棄して次の6個区間を開始します。6個を置き切った後は「生地リセット」で次の6個分を開始できます。24個のID区間は6個ずつ4回のタイマーで使い切ります。90秒の加熱タイマーとは別です。</li>}</ol>
   <p className="help-note">「操作を取り消す」では直近50件までの楕円配置・鉄板上の移動・盤外削除を操作順に戻せます。タイマー開始、温度変更、完成ボックスへの移動、提供・提供不可の確定を行うと、それ以前の取り消し履歴は消えます。過密な旧データは位置を保って表示し、新規配置とその鉄板にある楕円の移動はできません。</p>
-  <p className="help-note">実行記録CSVはお好み焼きIDごとに1行です。鉄板投入時刻は配置の保存時、下段→上段移動時刻は移動の保存時に記録します。以前のデータなど時刻を取得できない場合は空欄です。移動を取り消すと移動時刻も取り消されます。「温度区間(℃・開始順)」と「区間加熱秒数(開始順)」は開始順のリストで、各位置が対応します。区切りは「 | 」で、温度不明の区間も対応する秒数と同じ位置に残ります。合計秒数と焼き上がり・保管・提供の時刻、最終ステータスも記録ごとに1回出力します。</p>
+  <p className="help-note">実行記録CSVは安定した記録IDごとに1行です。CSVの「お好み焼きID」は記録作成時の番号を保持するため、削除後に画面で詰め直された表示IDと異なる場合があります。列名と列数は変わりません。鉄板投入時刻は配置の保存時、下段→上段移動時刻は移動の保存時に記録します。以前のデータなど時刻を取得できない場合は空欄です。移動を取り消すと移動時刻も取り消されます。「温度区間(℃・開始順)」と「区間加熱秒数(開始順)」は開始順のリストで、各位置が対応します。区切りは「 | 」で、温度不明の区間も対応する秒数と同じ位置に残ります。合計秒数と焼き上がり・保管・提供の時刻、最終ステータスも記録ごとに1回出力します。</p>
   {__PAGES_MODE__?<>
     <p className="help-note">調理状態はこのスマートフォンのこのブラウザー内だけに保存され、PC版や別ブラウザーとは共有されません。サイトデータの削除、ブラウザー変更、端末交換で消えることがあります。定期的に「データ管理」からJSONバックアップを保存してください。CSVは完了した実行記録だけの書き出しで、盤面復元には使えません。</p>
     <p className="help-note">調理中は画面を表示してご利用ください。画面ロック中にタイマー通知やアラームを鳴らす保証はありません。新しい版の案内が表示されたら、調理を終えてから「新しい版に更新」を押してください。</p>
@@ -518,7 +522,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    <header className="completion-box-heading"><div><h2>完成ボックス</h2><p>赤くなったお好み焼きは30分以内に提供</p></div><span>{completionItems.length} 個</span></header>
    <div className="completion-list" role="list">
      {completionItems.map(boxItem=>{
-       const record=recordsById.get(boxItem.id);
+       const record=recordsByEntityKey.get(boxItem.entityKey);
        if(!record)return null;
        const outcome=completionStatus(record,now);
        const clock=completionTimer(record,now);
@@ -527,7 +531,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
        const seconds=String(clock.remainingSeconds%60).padStart(2,"0");
        const label=unavailable?"提供不可":`${minutes}:${seconds} 残り`;
        const deadline=localClockLabel(record.serveDeadlineAt);
-       return <button key={boxItem.id} type="button" role="listitem" title={`お好み焼きID: ${boxItem.id}`} className={`completion-card ${unavailable?"unavailable":""} ${pendingIds.has(boxItem.id)?"pending":""}`} disabled={!available||pendingIds.has(boxItem.id)} aria-label={`お好み焼きID ${boxItem.id}、${label}。タップして${unavailable?"提供不可として取り出す":"提供済みにする"}`} onClick={()=>run({operationId:createUuid(),type:"remove",id:boxItem.id,expectedVersion:boxItem.version})}>
+       return <button key={boxItem.entityKey} type="button" role="listitem" title={`お好み焼きID: ${boxItem.id}`} className={`completion-card ${unavailable?"unavailable":""} ${isItemPending(boxItem)?"pending":""}`} disabled={!available||isItemPending(boxItem)} aria-label={`お好み焼きID ${boxItem.id}、${label}。タップして${unavailable?"提供不可として取り出す":"提供済みにする"}`} onClick={()=>run({operationId:createUuid(),type:"remove",id:boxItem.id,expectedVersion:boxItem.version})}>
          <span className="completion-card-id">{boxItem.id}</span>
          <strong>{label}</strong>
          <small>{unavailable?"期限切れ":`期限 ${deadline}`}</small>
@@ -555,7 +559,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      const blankMoveBlockReason=t.state==="blank"&&lowerRow&&upperCell?gridMoveBlockReason(items,item.id,item.plate,upperCell.index):null;
      const blankTapInstruction=t.state!=="blank"?"":!lowerRow?"タップで90秒の計測を開始":!upperCell?"上段の移動先を確認できません":upperCellOccupied?"上段使用中のためタップで計測開始":blankMoveBlockReason?`${gridMoveBlockMessage(blankMoveBlockReason)} 待機状態です`:"タップで上段へ移動。上段で再度タップすると計測開始";
      const timerY=cy+ry*(lowerRow?-0.68:0.68);
-      const busy=pendingIds.has(item.id);
+      const busy=isItemPending(item);
       const longPressArmed=deleteDragCue?.entityKey===item.entityKey;
       const deleteDragging=longPressArmed&&deleteDragCue.dragging;
       return <g key={item.entityKey} data-item-key={item.entityKey} data-item-id={item.id} data-plate={plate} data-state={t.state} data-duration="90" data-temperature={item.temperature} data-version={item.version} className={`oval ${busy?"pending":""}${longPressArmed?" long-press-armed":""}${deleteDragging?" delete-dragging":""}`}>
