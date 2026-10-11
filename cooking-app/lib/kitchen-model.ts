@@ -15,7 +15,8 @@ export const GRID_CELLS: readonly GridCell[] = Array.from({length:GRID_CELLS_PER
 });
 export const TIMER_DURATION = 90;
 export const COMPLETION_BOX_DURATION = 30 * 60;
-export const DOUGH_BATCH_SIZE = 24;
+export const DOUGH_TIMER_BATCH_SIZE = 6;
+export const DOUGH_ID_BLOCK_SIZE = 24;
 export const DOUGH_BATCH_DURATION = 20 * 60 * 1000;
 export const DEFAULT_TEMPERATURE = 96;
 export const LEGACY_SERVICE_OUTCOME = "導入前・判定不可";
@@ -98,14 +99,14 @@ export const INITIAL_BOARD_GENERATION = 0;
 
 const UUID_V4_RX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SEQUENTIAL_ID_RX = /^([1-8])-(?:([1-9])|(1[0-9])|(2[0-4]))$/;
-export const MAX_PANCAKE_IDS = 8 * 24;
+export const MAX_PANCAKE_IDS = 8 * DOUGH_ID_BLOCK_SIZE;
 export const INITIAL_PANCAKE_ORDINAL = 1;
 
 export function nextDoughBatchFirstOrdinal(nextPancakeOrdinal: number): number {
   if (!Number.isSafeInteger(nextPancakeOrdinal) || nextPancakeOrdinal < INITIAL_PANCAKE_ORDINAL || nextPancakeOrdinal > MAX_PANCAKE_IDS + 1) {
     throw new KitchenError("invalid_state", "お好み焼きIDの次番号を確認できません。");
   }
-  return nextPancakeOrdinal + ((DOUGH_BATCH_SIZE - ((nextPancakeOrdinal - INITIAL_PANCAKE_ORDINAL) % DOUGH_BATCH_SIZE)) % DOUGH_BATCH_SIZE);
+  return nextPancakeOrdinal + ((DOUGH_ID_BLOCK_SIZE - ((nextPancakeOrdinal - INITIAL_PANCAKE_ORDINAL) % DOUGH_ID_BLOCK_SIZE)) % DOUGH_ID_BLOCK_SIZE);
 }
 
 export function doughBatchStatus(batch: DoughBatchState | null | undefined, now: number): "not_started" | "active" | "expired" | "complete" {
@@ -114,7 +115,7 @@ export function doughBatchStatus(batch: DoughBatchState | null | undefined, now:
   return now <= batch.deadlineAt ? "active" : "expired";
 }
 
-function normalizeDoughBatch(value: unknown, nextPancakeOrdinal: number): DoughBatchState | null | undefined {
+function normalizeDoughBatch(value: unknown, nextPancakeOrdinal: number, batchSize = DOUGH_TIMER_BATCH_SIZE): DoughBatchState | null | undefined {
   if (value === undefined) return undefined;
   if (value === null) return null;
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("保存データの生地タイマーが正しくありません。");
@@ -126,15 +127,16 @@ function normalizeDoughBatch(value: unknown, nextPancakeOrdinal: number): DoughB
   const rawPlacedIds = candidate.placedIds;
   const completedAt = candidate.completedAt;
   if (!isUuidV4(candidate.batchId)
-    || !Number.isSafeInteger(first) || (first as number) < 1 || (first as number) > MAX_PANCAKE_IDS - DOUGH_BATCH_SIZE + 1
-    || ((first as number) - INITIAL_PANCAKE_ORDINAL) % DOUGH_BATCH_SIZE !== 0
+    || !Number.isSafeInteger(first) || (first as number) < 1 || (first as number) > MAX_PANCAKE_IDS - batchSize + 1
+    || ((first as number) - INITIAL_PANCAKE_ORDINAL) % batchSize !== 0
+    || ((first as number) - INITIAL_PANCAKE_ORDINAL) % DOUGH_ID_BLOCK_SIZE > DOUGH_ID_BLOCK_SIZE - batchSize
     || !Number.isSafeInteger(startedAt) || (startedAt as number) < 0
     || !Number.isSafeInteger(deadlineAt) || deadlineAt !== (startedAt as number) + DOUGH_BATCH_DURATION
     || !(Array.isArray(rawPlacedKeys) || Array.isArray(rawPlacedIds))
     || (Array.isArray(rawPlacedKeys) && Array.isArray(rawPlacedIds))
-    || (Array.isArray(rawPlacedKeys) ? rawPlacedKeys.length : (rawPlacedIds as unknown[]).length) > DOUGH_BATCH_SIZE
+    || (Array.isArray(rawPlacedKeys) ? rawPlacedKeys.length : (rawPlacedIds as unknown[]).length) > batchSize
     || !(completedAt === null || (Number.isSafeInteger(completedAt) && (completedAt as number) >= (startedAt as number) && (completedAt as number) <= (deadlineAt as number)))
-    || ((Array.isArray(rawPlacedKeys) ? rawPlacedKeys.length : (rawPlacedIds as unknown[]).length) === DOUGH_BATCH_SIZE) !== (completedAt !== null)) {
+    || ((Array.isArray(rawPlacedKeys) ? rawPlacedKeys.length : (rawPlacedIds as unknown[]).length) === batchSize) !== (completedAt !== null)) {
     throw new Error("保存データの生地タイマーが正しくありません。");
   }
   const placedValues = (Array.isArray(rawPlacedKeys) ? rawPlacedKeys : rawPlacedIds) as unknown[];
@@ -899,6 +901,7 @@ export function normalizeBoardData(input: {
   nextCreationOrdinal?:unknown;
   undoHistory?: unknown;
   doughBatch?: unknown;
+  doughBatchSize?:number;
   strictPublicIds?:boolean;
   strictEntityMetadata?:boolean;
 }): NormalizedBoardData {
@@ -950,7 +953,7 @@ export function normalizeBoardData(input: {
   validateUndoEntityReferences(items, normalizedRecords, normalizedCompletion, normalizedUndo);
   const dense = relabelEntities(items, normalizedRecords, normalizedCompletion, normalizedUndo);
   if (input.strictPublicIds && dense.changed) throw new Error("保存データの公開IDが連続していません。");
-  const doughBatch = normalizeDoughBatch(input.doughBatch, nextPancakeOrdinal);
+  const doughBatch = normalizeDoughBatch(input.doughBatch, nextPancakeOrdinal, input.doughBatchSize);
   return {
     generation:generation as number,
     items:dense.items,
@@ -1133,20 +1136,20 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
       throw new KitchenError("dough_conflict", "生地セットはすでに開始されています。最新の表示を確認してください。");
     }
     if (command.type === "doughReset" && (!current || current.completedAt === null)) {
-      throw new KitchenError("dough_incomplete", "24個の配置が完了した後に生地リセットを押してください。");
+      throw new KitchenError("dough_incomplete", `${DOUGH_TIMER_BATCH_SIZE}個の配置が完了した後に生地リセットを押してください。`);
     }
     if (command.type === "doughDiscardAndStart" && (!current || current.completedAt !== null || now <= current.deadlineAt)) {
-      throw new KitchenError("dough_not_expired", "期限超過後に残りを廃棄して次セットを開始してください。");
+      throw new KitchenError("dough_not_expired", `期限超過後に残りを廃棄して次の${DOUGH_TIMER_BATCH_SIZE}個区間を開始してください。`);
     }
     let firstPancakeOrdinal: number;
-    if (command.type === "doughDiscardAndStart") {
+    if (command.type === "doughDiscardAndStart" || command.type === "doughReset") {
       if (!current) throw new KitchenError("dough_conflict", "期限切れの生地セットを確認できません。最新の表示を確認してください。");
-      firstPancakeOrdinal = current.firstPancakeOrdinal + DOUGH_BATCH_SIZE;
+      firstPancakeOrdinal = current.firstPancakeOrdinal + DOUGH_TIMER_BATCH_SIZE;
     } else {
       firstPancakeOrdinal = nextDoughBatchFirstOrdinal(board.nextPancakeOrdinal);
     }
-    if (firstPancakeOrdinal + DOUGH_BATCH_SIZE - 1 > MAX_PANCAKE_IDS) {
-      throw new KitchenError("id_capacity", "お好み焼きIDの上限に達しているため、次の24個セットを開始できません。");
+    if (firstPancakeOrdinal + DOUGH_TIMER_BATCH_SIZE - 1 > MAX_PANCAKE_IDS) {
+      throw new KitchenError("id_capacity", `お好み焼きIDの上限に達しているため、次の${DOUGH_TIMER_BATCH_SIZE}個セットを開始できません。`);
     }
     if (board.generation >= Number.MAX_SAFE_INTEGER) throw new KitchenError("invalid_state", "盤面世代が上限に達したため、生地セットを開始できません。");
     if (!Number.isSafeInteger(now) || now < 0 || now + DOUGH_BATCH_DURATION > Number.MAX_SAFE_INTEGER) {
@@ -1327,8 +1330,8 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
         throw new KitchenError("dough_conflict", "生地セットまたは次のお好み焼きIDが更新されています。画面を再読み込みしてください。");
       }
       if (!currentBatch) throw new KitchenError("dough_not_started", "新しい楕円を置く前に「生地を取り出す」を押してください。");
-      if (currentBatch.completedAt !== null || currentBatch.placedEntityKeys.length >= DOUGH_BATCH_SIZE) {
-        throw new KitchenError("dough_complete", "この生地セットは24個の配置が完了しています。「生地リセット」で次のセットを開始してください。");
+      if (currentBatch.completedAt !== null || currentBatch.placedEntityKeys.length >= DOUGH_TIMER_BATCH_SIZE) {
+        throw new KitchenError("dough_complete", `${DOUGH_TIMER_BATCH_SIZE}個の配置が完了しています。「生地リセット」で次の区間を開始してください。`);
       }
       if (now > currentBatch.deadlineAt) throw new KitchenError("dough_expired", "生地の20分期限を過ぎています。配置を停止し、残りを廃棄してください。");
       if (currentBatch.firstPancakeOrdinal + currentBatch.placedEntityKeys.length !== board.nextPancakeOrdinal) {
@@ -1337,7 +1340,7 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
       nextDoughBatch = {
         ...currentBatch,
         placedEntityKeys:[...currentBatch.placedEntityKeys, command.operationId],
-        completedAt:currentBatch.placedEntityKeys.length + 1 === DOUGH_BATCH_SIZE ? now : null,
+        completedAt:currentBatch.placedEntityKeys.length + 1 === DOUGH_TIMER_BATCH_SIZE ? now : null,
       };
     }
     const position = nearestGridCell(command.x, command.y);

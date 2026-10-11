@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { applySnapshotCommand, parseCommand, type Command, type Snapshot } from "./kitchen-model";
-import { LOCAL_BOARD_KEY, readLocalBoard, writeLocalBoard, type ParsedLocalBoardBackup } from "./local-kitchen-storage";
+import { LegacyDoughTimerResetRequiredError, LOCAL_BOARD_KEY, readLocalBoard, resetUnreadableLegacyDoughBoard, writeLocalBoard, type ParsedLocalBoardBackup } from "./local-kitchen-storage";
 
 const EDITOR_LOCK = `${LOCAL_BOARD_KEY}:editor`;
 
@@ -17,6 +17,8 @@ export function useKitchenLocal() {
   const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
   const [backupBusy, setBackupBusy] = useState(false);
   const [recoveryAvailable, setRecoveryAvailable] = useState(false);
+  const [legacyDoughResetRequired, setLegacyDoughResetRequired] = useState(false);
+  const [legacyDoughResetAvailable, setLegacyDoughResetAvailable] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(lockSupported ? null : "このブラウザーは複数画面の競合を防ぐ機能に対応していません。対応ブラウザーで開いてください。");
   const [cacheState, setCacheState] = useState<CacheState>(serviceWorkerSupported ? "preparing" : "unavailable");
   const [updateReady, setUpdateReady] = useState(false);
@@ -27,6 +29,7 @@ export function useKitchenLocal() {
   const pending = useRef(new Set<string>());
   const backupRestoreInProgress = useRef(false);
   const recoverySourceRaw = useRef<string|null>(null);
+  const legacyDoughResetSourceRaw = useRef<string|null>(null);
   const mutationQueue = useRef(Promise.resolve());
   const registration = useRef<ServiceWorkerRegistration | null>(null);
   const updateRequested = useRef(false);
@@ -40,6 +43,26 @@ export function useKitchenLocal() {
   const prepareUnreadableBoardRecovery = useCallback((error: unknown) => {
     recoverySourceRaw.current = null;
     setRecoveryAvailable(false);
+    if (error instanceof LegacyDoughTimerResetRequiredError) {
+      legacyDoughResetSourceRaw.current = null;
+      setLegacyDoughResetRequired(true);
+      setLegacyDoughResetAvailable(false);
+      if (activeEditor.current) {
+        try {
+          const raw = window.localStorage.getItem(LOCAL_BOARD_KEY);
+          if (raw !== null) {
+            legacyDoughResetSourceRaw.current = raw;
+            setLegacyDoughResetAvailable(true);
+          }
+        } catch {
+          // Keep editing blocked and do not expose recovery or reset without a stable source value.
+        }
+      }
+      return false;
+    }
+    legacyDoughResetSourceRaw.current = null;
+    setLegacyDoughResetRequired(false);
+    setLegacyDoughResetAvailable(false);
     if (!activeEditor.current || error instanceof DOMException || !(error instanceof Error)) return false;
 
     try {
@@ -59,7 +82,10 @@ export function useKitchenLocal() {
     try {
       publish(readLocalBoard());
       recoverySourceRaw.current = null;
+      legacyDoughResetSourceRaw.current = null;
       setRecoveryAvailable(false);
+      setLegacyDoughResetRequired(false);
+      setLegacyDoughResetAvailable(false);
       setStatusMessage(null);
       if (activeEditor.current) setConnection("online");
     } catch (error) {
@@ -90,7 +116,10 @@ export function useKitchenLocal() {
         try {
           publish(readLocalBoard());
           recoverySourceRaw.current = null;
+          legacyDoughResetSourceRaw.current = null;
           setRecoveryAvailable(false);
+          setLegacyDoughResetRequired(false);
+          setLegacyDoughResetAvailable(false);
           setStatusMessage(null);
           setConnection("online");
         } catch (error) {
@@ -176,6 +205,7 @@ export function useKitchenLocal() {
 
   const send = useCallback((input: Command): Promise<Snapshot> => {
     if (backupRestoreInProgress.current) throw new Error("バックアップを復元中です。完了してから操作してください。");
+    if (legacyDoughResetRequired) throw new Error("旧24個タイマーの未完了セットがあります。全体リセットが必要です。");
     if (!activeEditor.current || !state.current) throw new Error("保存画面の準備ができていません。画面を開き直してください。");
     const command = parseCommand({...input, expectedGeneration:input.expectedGeneration ?? state.current.generation});
     const pendingKey = command.type === "create" || command.type === "undo" || command.type === "reset"
@@ -221,8 +251,13 @@ export function useKitchenLocal() {
         writeFailed.current = true;
         setStatusMessage("端末へ保存できません。ブラウザーのサイトデータ設定を確認してください。");
         setConnection("offline");
+      } else if (error instanceof LegacyDoughTimerResetRequiredError) {
+        prepareUnreadableBoardRecovery(error);
+        setStatusMessage(error.message);
+        setConnection("offline");
       } else if (message.includes("保存データ")) {
         writeFailed.current = true;
+        prepareUnreadableBoardRecovery(error);
         setStatusMessage(message);
         setConnection("offline");
       }
@@ -233,9 +268,10 @@ export function useKitchenLocal() {
       pending.current.delete(pendingKey);
       if (alive.current) setPendingIds(new Set(pending.current));
     });
-  }, [publish]);
+  }, [legacyDoughResetRequired, prepareUnreadableBoardRecovery, publish]);
 
   const restoreBackup = useCallback((backup: ParsedLocalBoardBackup, expectedRevision: number|null): Promise<Snapshot> => {
+    if (legacyDoughResetRequired) throw new Error("旧24個タイマーの未完了セットがあるため、バックアップ復元は停止しています。全体リセットが必要です。");
     const recoveringUnreadableBoard = expectedRevision === null;
     if (!activeEditor.current || (!state.current && !recoveringUnreadableBoard)) throw new Error("保存画面の準備ができていません。画面を開き直してください。");
     if (recoveringUnreadableBoard && (!recoveryAvailable || recoverySourceRaw.current === null)) throw new Error("この画面では保存データを復旧できません。編集ロックと保存領域を確認して開き直してください。");
@@ -344,7 +380,66 @@ export function useKitchenLocal() {
         setPendingIds(new Set(pending.current));
       }
     });
-  }, [prepareUnreadableBoardRecovery, publish, recoveryAvailable]);
+  }, [legacyDoughResetRequired, prepareUnreadableBoardRecovery, publish, recoveryAvailable]);
+
+  const resetLegacyDoughData = useCallback((): Promise<Snapshot> => {
+    if (!activeEditor.current || !legacyDoughResetRequired || !legacyDoughResetSourceRaw.current) {
+      throw new Error("旧生地タイマーの状態を確認できません。画面を開き直して再確認してください。");
+    }
+    if (backupRestoreInProgress.current || pending.current.size > 0) {
+      throw new Error("別の操作が終わってから全体リセットしてください。");
+    }
+
+    const expectedRaw = legacyDoughResetSourceRaw.current;
+    const pendingKey = "__legacy-dough-full-reset__";
+    pending.current.add(pendingKey);
+    setPendingIds(new Set(pending.current));
+    const operation = mutationQueue.current.then(() => {
+      if (!activeEditor.current) throw new Error("操作を保存できません。アプリを開き直してください。");
+      const next = resetUnreadableLegacyDoughBoard(expectedRaw);
+      writeFailed.current = false;
+      legacyDoughResetSourceRaw.current = null;
+      recoverySourceRaw.current = null;
+      setRecoveryAvailable(false);
+      setLegacyDoughResetRequired(false);
+      setLegacyDoughResetAvailable(false);
+      publish(next);
+      setStatusMessage(null);
+      setConnection("online");
+      return next;
+    });
+    mutationQueue.current = operation.then(() => undefined, () => undefined);
+
+    return operation.catch(error => {
+      const message = error instanceof Error ? error.message : "全体リセットを保存できませんでした。";
+      let sourceStillMatches = false;
+      try {
+        sourceStillMatches = activeEditor.current && window.localStorage.getItem(LOCAL_BOARD_KEY) === expectedRaw;
+      } catch {
+        sourceStillMatches = false;
+      }
+      setLegacyDoughResetAvailable(sourceStillMatches);
+      if (!sourceStillMatches) legacyDoughResetSourceRaw.current = null;
+      if (error instanceof DOMException && error.name === "QuotaExceededError") {
+        writeFailed.current = true;
+        setStatusMessage(sourceStillMatches
+          ? "端末の保存領域がいっぱいで全体リセットを保存できませんでした。現在のデータは保持しています。空き容量を確保してから再試行してください。"
+          : "保存状態が変わったため全体リセットを停止しました。画面を開き直して確認してください。");
+        setConnection("offline");
+      } else if (error instanceof DOMException || error instanceof TypeError) {
+        setStatusMessage("端末へ保存できないため全体リセットを停止しました。現在のデータは保持しています。ブラウザーのサイトデータ設定を確認してください。");
+        setConnection("offline");
+      } else {
+        setStatusMessage(message);
+        setConnection("offline");
+      }
+      toast.error(message);
+      throw error;
+    }).finally(() => {
+      pending.current.delete(pendingKey);
+      if (alive.current) setPendingIds(new Set(pending.current));
+    });
+  }, [legacyDoughResetRequired, publish]);
 
   const applyUpdate = useCallback(() => {
     const waiting = registration.current?.waiting;
@@ -360,8 +455,11 @@ export function useKitchenLocal() {
     pendingIds,
     backupBusy,
     recoveryAvailable,
+    legacyDoughResetRequired,
+    legacyDoughResetAvailable,
     send,
     restoreBackup,
+    resetLegacyDoughData,
     sync,
     currentTime: () => Date.now(),
     getSnapshot: () => state.current,

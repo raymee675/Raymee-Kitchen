@@ -6,7 +6,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
 import { useKitchen } from "@/lib/use-kitchen";
 import { useKitchenLocal } from "@/lib/use-kitchen-local";
-import { DOUGH_BATCH_SIZE, GRID_CELLS, GRID_COLUMNS, GRID_ROWS, MAX_PANCAKE_IDS, OVAL_RX, OVAL_RY, completionStatus, completionTimer, doughBatchStatus, gridCellAt, gridMoveBlockReason, isGridCellActuallyOccupied, isGridCellOccupied, isGridOverCapacity, nearestGridCell, nextDoughBatchFirstOrdinal, pancakeIdForOrdinal, timer, parseCommand, type GridMoveBlockReason, type Pancake, type Command, type Snapshot } from "@/lib/kitchen-model";
+import { DOUGH_ID_BLOCK_SIZE, DOUGH_TIMER_BATCH_SIZE, GRID_CELLS, GRID_COLUMNS, GRID_ROWS, MAX_PANCAKE_IDS, OVAL_RX, OVAL_RY, completionStatus, completionTimer, doughBatchStatus, gridCellAt, gridMoveBlockReason, isGridCellActuallyOccupied, isGridCellOccupied, isGridOverCapacity, nearestGridCell, nextDoughBatchFirstOrdinal, pancakeIdForOrdinal, timer, parseCommand, type GridMoveBlockReason, type Pancake, type Command, type Snapshot } from "@/lib/kitchen-model";
 import { downloadExecutionRecords } from "@/lib/execution-record-export";
 import { createLocalBoardBackup, parseLocalBoardBackup, type ParsedLocalBoardBackup } from "@/lib/local-kitchen-storage";
 import { createUuid } from "@/lib/uuid";
@@ -20,8 +20,11 @@ type KitchenController = {
  pendingIds:Set<string>;
  backupBusy?:boolean;
  recoveryAvailable?:boolean;
+ legacyDoughResetRequired?:boolean;
+ legacyDoughResetAvailable?:boolean;
  send:(command:Command)=>Promise<Snapshot>;
  restoreBackup?:(backup:ParsedLocalBoardBackup,expectedRevision:number|null)=>Promise<Snapshot>;
+ resetLegacyDoughData?:()=>Promise<Snapshot>;
  sync:()=>Promise<void>;
  currentTime:()=>number;
  getSnapshot:()=>Snapshot|null;
@@ -94,6 +97,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  const [backupDraft,setBackupDraft] = useState<ParsedLocalBoardBackup|null>(null);
  const [backupReading,setBackupReading] = useState(false);
  const [resetConfirmation,setResetConfirmation] = useState(false);
+ const [legacyDoughResetConfirmation,setLegacyDoughResetConfirmation] = useState(false);
  const resetSubmitting=useRef(false);
  const contact = useRef<Contact|null>(null);
  const backupFileInput = useRef<HTMLInputElement|null>(null);
@@ -103,7 +107,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  const actions = useRef(kitchen);
  useEffect(()=>{actions.current=kitchen;},[kitchen]);
  const available = connection === "online" && !kitchen.backupBusy;
- const canRestoreBoard = Boolean(kitchen.recoveryAvailable || (snapshot && available));
+ const canRestoreBoard = !kitchen.legacyDoughResetRequired && Boolean(kitchen.recoveryAvailable || (snapshot && available));
  const observedGeneration = useRef<number|null>(snapshot?.generation ?? null);
  useEffect(()=>{
    const nextGeneration=snapshot?.generation ?? null;
@@ -122,17 +126,17 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  const completionItems = snapshot?.completionItems ?? [];
  const doughBatch = __PAGES_MODE__ ? snapshot?.doughBatch ?? null : null;
  const doughStatus = doughBatchStatus(doughBatch,now);
- const nextDoughFirstOrdinal = doughStatus==="expired"&&doughBatch
-   ? doughBatch.firstPancakeOrdinal+DOUGH_BATCH_SIZE
+ const nextDoughFirstOrdinal = (doughStatus==="expired"||doughStatus==="complete")&&doughBatch
+   ? doughBatch.firstPancakeOrdinal+DOUGH_TIMER_BATCH_SIZE
    : snapshot ? nextDoughBatchFirstOrdinal(snapshot.nextPancakeOrdinal) : null;
- const canStartNextDoughBatch = nextDoughFirstOrdinal !== null && nextDoughFirstOrdinal + DOUGH_BATCH_SIZE - 1 <= MAX_PANCAKE_IDS;
+ const canStartNextDoughBatch = nextDoughFirstOrdinal !== null && nextDoughFirstOrdinal + DOUGH_TIMER_BATCH_SIZE - 1 <= MAX_PANCAKE_IDS;
  const doughSkippedIdsMessage = doughStatus!=="expired"&&snapshot && nextDoughFirstOrdinal !== null && nextDoughFirstOrdinal > snapshot.nextPancakeOrdinal
-   ? `未使用ID ${pancakeOrdinalLabel(snapshot.nextPancakeOrdinal)}〜${pancakeOrdinalLabel(nextDoughFirstOrdinal - 1)} は飛ばし、${pancakeOrdinalLabel(nextDoughFirstOrdinal)}から24個分を割り当てます。`
+   ? `未使用ID ${pancakeOrdinalLabel(snapshot.nextPancakeOrdinal)}〜${pancakeOrdinalLabel(nextDoughFirstOrdinal - 1)} は飛ばし、${pancakeOrdinalLabel(nextDoughFirstOrdinal)}から6個分を割り当てます。${DOUGH_ID_BLOCK_SIZE}個のID区間は6個ずつ${DOUGH_ID_BLOCK_SIZE / DOUGH_TIMER_BATCH_SIZE}回で使い切ります。`
    : null;
  const expiredDoughSkipMessage = doughStatus==="expired"&&doughBatch
    ? nextDoughFirstOrdinal!==null&&nextDoughFirstOrdinal<=MAX_PANCAKE_IDS
-     ? `期限切れセットのID ${pancakeOrdinalLabel(doughBatch.firstPancakeOrdinal)}〜${pancakeOrdinalLabel(doughBatch.firstPancakeOrdinal+DOUGH_BATCH_SIZE-1)} は再利用せず、${pancakeOrdinalLabel(nextDoughFirstOrdinal)}から次の24個分を割り当てます。`
-     : `期限切れセットのID ${pancakeOrdinalLabel(doughBatch.firstPancakeOrdinal)}〜${pancakeOrdinalLabel(doughBatch.firstPancakeOrdinal+DOUGH_BATCH_SIZE-1)} は再利用せず、次の24個分はID上限のため開始できません。`
+     ? `期限切れ区間のID ${pancakeOrdinalLabel(doughBatch.firstPancakeOrdinal)}〜${pancakeOrdinalLabel(doughBatch.firstPancakeOrdinal+DOUGH_TIMER_BATCH_SIZE-1)} は再利用せず、${pancakeOrdinalLabel(nextDoughFirstOrdinal)}から次の${DOUGH_TIMER_BATCH_SIZE}個分を割り当てます。`
+     : `期限切れ区間のID ${pancakeOrdinalLabel(doughBatch.firstPancakeOrdinal)}〜${pancakeOrdinalLabel(doughBatch.firstPancakeOrdinal+DOUGH_TIMER_BATCH_SIZE-1)} は再利用せず、次の${DOUGH_TIMER_BATCH_SIZE}個分はID上限のため開始できません。`
    : null;
  const counts = {blank:0,running:0,done:0};
  items.forEach(item=>counts[timer(item,now).state]++);
@@ -175,9 +179,9 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    }
    else if(command.type==="undo") toast.success("直前の操作を取り消しました。",{duration:1800});
     else if(command.type==="delete") toast.success("楕円を削除しました。必要なら「操作を取り消す」で戻せます。",{duration:2200});
-   else if(command.type==="doughStart") toast.success(`生地タイマーを開始しました。ID ${pancakeOrdinalLabel(result.doughBatch?.firstPancakeOrdinal ?? 1)}から20分です。`,{duration:2400});
-   else if(command.type==="doughReset") toast.success("新しい生地セットを開始しました。",{duration:2000});
-   else if(command.type==="doughDiscardAndStart") toast.success("残りを廃棄し、新しい生地セットを開始しました。",{duration:2400});
+   else if(command.type==="doughStart") toast.success(`生地タイマーを開始しました。ID ${pancakeOrdinalLabel(result.doughBatch?.firstPancakeOrdinal ?? 1)}から6個分の20分です。`,{duration:2400});
+   else if(command.type==="doughReset") toast.success("次の6個分の生地タイマーを開始しました。",{duration:2000});
+   else if(command.type==="doughDiscardAndStart") toast.success("残りを廃棄し、次の6個分の生地タイマーを開始しました。",{duration:2400});
  }).catch(()=>{}); };
  function exportRecords() {
     if (!records.length) return;
@@ -230,6 +234,17 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    void send({operationId:createUuid(),type:"reset",expectedGeneration:snapshot.generation}).then(()=>{
      setResetConfirmation(false);
      toast.success("調理データを初期化しました。次のIDは1-1です。",{duration:2400});
+   }).catch(()=>{}).finally(()=>{resetSubmitting.current=false;});
+ }
+ function confirmLegacyDoughReset() {
+   if(!kitchen.legacyDoughResetRequired||!kitchen.legacyDoughResetAvailable||!kitchen.resetLegacyDoughData||pendingIds.size>0||resetSubmitting.current)return;
+   resetSubmitting.current=true;
+   let operation:Promise<Snapshot>;
+   try { operation=kitchen.resetLegacyDoughData(); }
+   catch(error) { resetSubmitting.current=false; toast.error(error instanceof Error?error.message:"全体リセットを開始できませんでした。"); return; }
+   void operation.then(()=>{
+     setLegacyDoughResetConfirmation(false);
+     toast.success("調理データ全体を初期化しました。次のIDは1-1です。",{duration:2400});
    }).catch(()=>{}).finally(()=>{resetSubmitting.current=false;});
  }
  function changeDoughBatch(type:"doughStart"|"doughReset"|"doughDiscardAndStart") {
@@ -381,7 +396,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      if(gridBlocked) { toast.error("各鉄板が6枚以下になるまで配置できません。"); return; }
      if(isGridCellOccupied(items,c.plate,cell.index)) { toast.error("このマスにはすでに楕円があります。空いているマスをタップしてください。"); return; }
      if(__PAGES_MODE__&&doughStatus!=="active") {
-       toast.error(doughStatus==="not_started"?"配置前に「生地を取り出す」を押してください。":doughStatus==="expired"?"生地の20分期限を過ぎています。残りを廃棄して次セットを開始してください。":"24個の配置が完了しています。生地リセットで次セットを開始してください。");
+       toast.error(doughStatus==="not_started"?"配置前に「生地を取り出す」を押してください。":doughStatus==="expired"?"生地の20分期限を過ぎています。残りを廃棄して次の6個区間を開始してください。":"6個の配置が完了しています。生地リセットで次の6個区間を開始してください。");
        return;
      }
      run({operationId:createUuid(),expectedGeneration:c.expectedGeneration,type:"create",plate:c.plate,x:cell.x,y:cell.y,...(__PAGES_MODE__?{expectedDoughBatchId:c.expectedDoughBatchId,expectedNextPancakeOrdinal:c.expectedNextPancakeOrdinal}:{})});
@@ -434,7 +449,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
         <h3>復元するバックアップ</h3>
         <p>作成日時：{new Date(backupDraft.exportedAt).toLocaleString("ja-JP")}</p>
         <p>読み込み後：鉄板上の楕円 {backupDraft.snapshot.items.length}枚・完成ボックス {backupDraft.snapshot.completionItems.length}個・実行記録 {backupDraft.snapshot.records.length}件</p>
-        <p>生地セット：{backupDraft.snapshot.doughBatch?`配置済み ${backupDraft.snapshot.doughBatch.placedEntityKeys.length}/${DOUGH_BATCH_SIZE}個・期限 ${localClockLabel(backupDraft.snapshot.doughBatch.deadlineAt)}`:"未開始"}</p>
+        <p>生地セット：{backupDraft.snapshot.doughBatch?`配置済み ${backupDraft.snapshot.doughBatch.placedEntityKeys.length}/${DOUGH_TIMER_BATCH_SIZE}個・期限 ${localClockLabel(backupDraft.snapshot.doughBatch.deadlineAt)}`:"未開始"}</p>
         {kitchen.recoveryAvailable
           ? <p>置き換え対象：現在の保存データを読み込めません（バックアップから復旧）</p>
           : <p>置き換え対象：鉄板上の楕円 {items.length}枚・完成ボックス {completionItems.length}個・実行記録 {records.length}件</p>}
@@ -444,7 +459,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
     </DialogContent>
   </Dialog>}
   <Dialog open={help} onOpenChange={setHelp}><DialogTrigger asChild><button className="icon-button" aria-label="使い方"><CircleHelp size={21}/></button></DialogTrigger><DialogContent className="help-dialog"><DialogHeader><DialogTitle>鉄板タイマーの使い方</DialogTitle><DialogDescription>{__PAGES_MODE__?"調理状態は、このスマートフォンのこのブラウザー内だけに保存されます。":"同じ画面を開いたスマホで、調理の状態を共有できます。"}</DialogDescription></DialogHeader>
-  <ol className="help-list"><li>鉄板は縦2行・横3列の6マスです。新しい楕円は下段の空きマスをタップして配置します。上段は、下段から移動した楕円だけを置ける移動先専用です。</li><li>下段の待機中の楕円は、同じ鉄板・同じ列の上段が空いていればタップで上段へ移動します。上段が埋まっている場合は計測を始めます。移動できない配置の場合は元の場所に残り、理由を表示します。上段の待機中の楕円をタップすると固定90秒の計測が始まります。調理中の下段の楕円をタップすると、同じ鉄板・同じ列の真上にある空き上段マスへ移動します。移動先が使用中、または鉄板が過密の場合は移動せず、理由を表示します。上段の楕円は移動できません。</li>{__PAGES_MODE__&&<li>盤面から楕円を削除するには、楕円を450ミリ秒以上長押ししてから鉄板の外へドラッグし、外で離します。鉄板の上で離すと削除をキャンセルします。削除は「操作を取り消す」で元に戻せます。</li>}<li>楕円の左右にある矢印をタップすると、待機中・計測中の温度を1℃ずつ変更できます。焼き上がり後は変更できません。初期値は96℃です。この温度は設定・記録用で、センサーの実測値ではありません。計測時間は常に90秒です。</li><li>残り0秒で楕円が赤くなります。赤い楕円をタップすると完成ボックスへ移り、30分の保管タイマーが始まります。期限前に完成ボックスをタップすると提供済みになり、期限後は「提供不可」として履歴に残して取り出せます。</li>{__PAGES_MODE__&&<li>生地タイマーは「生地を取り出す」で開始する20分タイマーです。鉄板への新規配置が保存された時だけ24個の残数が減り、加熱開始や移動では減りません。20分を過ぎたら新規配置を停止し、残りを廃棄して次セットを開始します。24個を置き切った後は「生地リセット」で次セットを開始できます。90秒の加熱タイマーとは別です。</li>}</ol>
+  <ol className="help-list"><li>鉄板は縦2行・横3列の6マスです。新しい楕円は下段の空きマスをタップして配置します。上段は、下段から移動した楕円だけを置ける移動先専用です。</li><li>下段の待機中の楕円は、同じ鉄板・同じ列の上段が空いていればタップで上段へ移動します。上段が埋まっている場合は計測を始めます。移動できない配置の場合は元の場所に残り、理由を表示します。上段の待機中の楕円をタップすると固定90秒の計測が始まります。調理中の下段の楕円をタップすると、同じ鉄板・同じ列の真上にある空き上段マスへ移動します。移動先が使用中、または鉄板が過密の場合は移動せず、理由を表示します。上段の楕円は移動できません。</li>{__PAGES_MODE__&&<li>盤面から楕円を削除するには、楕円を450ミリ秒以上長押ししてから鉄板の外へドラッグし、外で離します。鉄板の上で離すと削除をキャンセルします。削除は「操作を取り消す」で元に戻せます。</li>}<li>楕円の左右にある矢印をタップすると、待機中・計測中の温度を1℃ずつ変更できます。焼き上がり後は変更できません。初期値は96℃です。この温度は設定・記録用で、センサーの実測値ではありません。計測時間は常に90秒です。</li><li>残り0秒で楕円が赤くなります。赤い楕円をタップすると完成ボックスへ移り、30分の保管タイマーが始まります。期限前に完成ボックスをタップすると提供済みになり、期限後は「提供不可」として履歴に残して取り出せます。</li>{__PAGES_MODE__&&<li>生地タイマーは「生地を取り出す」で開始する20分タイマーです。鉄板への新規配置が保存された時だけ6個の残数が減り、加熱開始や移動では減りません。20分を過ぎたら新規配置を停止し、残りを廃棄して次の6個区間を開始します。6個を置き切った後は「生地リセット」で次の6個分を開始できます。24個のID区間は6個ずつ4回のタイマーで使い切ります。90秒の加熱タイマーとは別です。</li>}</ol>
   <p className="help-note">「操作を取り消す」では直近50件までの楕円配置・鉄板上の移動・盤外削除を操作順に戻せます。タイマー開始、温度変更、完成ボックスへの移動、提供・提供不可の確定を行うと、それ以前の取り消し履歴は消えます。過密な旧データは位置を保って表示し、新規配置とその鉄板にある楕円の移動はできません。</p>
   <p className="help-note">実行記録CSVはお好み焼きIDごとに1行です。鉄板投入時刻は配置の保存時、下段→上段移動時刻は移動の保存時に記録します。以前のデータなど時刻を取得できない場合は空欄です。移動を取り消すと移動時刻も取り消されます。「温度区間(℃・開始順)」と「区間加熱秒数(開始順)」は開始順のリストで、各位置が対応します。区切りは「 | 」で、温度不明の区間も対応する秒数と同じ位置に残ります。合計秒数と焼き上がり・保管・提供の時刻、最終ステータスも記録ごとに1回出力します。</p>
   {__PAGES_MODE__?<>
@@ -459,33 +474,41 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
   {__PAGES_MODE__&&<p className="pages-storage-note" role="note">保存先はこのスマートフォンのこのブラウザーです。サイトデータ削除や端末交換に備え、「データ管理」からJSONバックアップを保存してください。</p>}
  <div className="overview"><p>調理状況</p><div className="totals"><span>待機 <b>{counts.blank}</b></span><span>調理中 <b>{counts.running}</b></span><span>焼き上がり <b className={counts.done?"finished-count":""}>{counts.done}</b></span><span>完成ボックス <b>{completionItems.length}</b></span></div></div>
  {__PAGES_MODE__&&<section className={`dough-timer-card dough-${doughStatus}`} aria-label="生地タイマー">
-   <header className="dough-timer-heading"><div><h2>生地タイマー</h2><p>冷蔵庫から出した生地24個分を、20分以内に配置</p></div>{doughBatch&&<span className="dough-count">{doughPlacedCount}/{DOUGH_BATCH_SIZE}</span>}</header>
+   <header className="dough-timer-heading"><div><h2>生地タイマー</h2><p>冷蔵庫から出した生地6個分を、20分以内に配置</p></div>{doughBatch&&<span className="dough-count">{doughPlacedCount}/{DOUGH_TIMER_BATCH_SIZE}</span>}</header>
    {doughStatus==="not_started"&&<>
-     <p className="dough-timer-message">新しい生地セットを取り出したら開始してください。開始前は新しい楕円を配置できません。</p>
+     <p className="dough-timer-message">新しい生地6個分を取り出したら開始してください。開始前は新しい楕円を配置できません。</p>
      {doughSkippedIdsMessage&&<p className="dough-timer-note" role="status">{doughSkippedIdsMessage}</p>}
-     {!canStartNextDoughBatch&&<p className="dough-timer-warning" role="status">お好み焼きIDの上限に達しているため、次の24個セットを開始できません。</p>}
+     {!canStartNextDoughBatch&&<p className="dough-timer-warning" role="status">お好み焼きIDの上限に達しているため、次の6個区間を開始できません。</p>}
      <button type="button" className="dough-timer-button" disabled={!snapshot||!available||pendingIds.size>0||!canStartNextDoughBatch} onClick={()=>changeDoughBatch("doughStart")}>生地を取り出す</button>
    </>}
-   {doughStatus==="active"&&doughBatch&&<div className="dough-timer-active" role="timer" aria-live="off" aria-label={`生地タイマー残り${doughRemainingLabel}、配置済み${doughPlacedCount}個、残り${DOUGH_BATCH_SIZE-doughPlacedCount}個`}>
+   {doughStatus==="active"&&doughBatch&&<div className="dough-timer-active" role="timer" aria-live="off" aria-label={`生地タイマー残り${doughRemainingLabel}、配置済み${doughPlacedCount}個、残り${DOUGH_TIMER_BATCH_SIZE-doughPlacedCount}個`}>
      <strong className="dough-clock">{doughRemainingLabel}</strong><span className="dough-clock-caption">残り時間</span>
-     <p>配置済み <b>{doughPlacedCount}/{DOUGH_BATCH_SIZE}</b> 個・残り <b>{DOUGH_BATCH_SIZE-doughPlacedCount}</b> 個</p>
+     <p>配置済み <b>{doughPlacedCount}/{DOUGH_TIMER_BATCH_SIZE}</b> 個・残り <b>{DOUGH_TIMER_BATCH_SIZE-doughPlacedCount}</b> 個</p>
      <small>期限 {localClockLabel(doughBatch.deadlineAt)}　生地タイマーは加熱90秒とは別です。</small>
    </div>}
    {doughStatus==="expired"&&doughBatch&&<>
-     <div className="dough-timer-warning" role="alert"><strong>20分の期限超過 — 新規配置を停止してください</strong><p>配置済み {doughPlacedCount}/{DOUGH_BATCH_SIZE} 個。残り {DOUGH_BATCH_SIZE-doughPlacedCount} 個は廃棄してください。</p></div>
+     <div className="dough-timer-warning" role="alert"><strong>20分の期限超過 — 新規配置を停止してください</strong><p>配置済み {doughPlacedCount}/{DOUGH_TIMER_BATCH_SIZE} 個。残り {DOUGH_TIMER_BATCH_SIZE-doughPlacedCount} 個は廃棄してください。</p></div>
      {expiredDoughSkipMessage&&<p className="dough-timer-note" role="status">{expiredDoughSkipMessage}</p>}
-     {!canStartNextDoughBatch&&<p className="dough-timer-warning" role="status">ID上限に達しているため次の生地セットを開始できません。</p>}
-     <button type="button" className="dough-timer-button dough-discard-button" disabled={!available||pendingIds.size>0||!canStartNextDoughBatch} onClick={()=>changeDoughBatch("doughDiscardAndStart")}>残りを廃棄して次セット開始</button>
+     {!canStartNextDoughBatch&&<p className="dough-timer-warning" role="status">ID上限に達しているため次の6個区間を開始できません。</p>}
+     <button type="button" className="dough-timer-button dough-discard-button" disabled={!available||pendingIds.size>0||!canStartNextDoughBatch} onClick={()=>changeDoughBatch("doughDiscardAndStart")}>残りを廃棄して次の6個区間を開始</button>
    </>}
    {doughStatus==="complete"&&doughBatch&&<>
-     <p className="dough-timer-complete" role="status">配置完了　{DOUGH_BATCH_SIZE}/{DOUGH_BATCH_SIZE} 個</p>
+     <p className="dough-timer-complete" role="status">配置完了　{DOUGH_TIMER_BATCH_SIZE}/{DOUGH_TIMER_BATCH_SIZE} 個</p>
      {doughSkippedIdsMessage&&<p className="dough-timer-note" role="status">{doughSkippedIdsMessage}</p>}
-     {!canStartNextDoughBatch&&<p className="dough-timer-warning" role="status">お好み焼きIDの上限に達したため、次のセットは開始できません。</p>}
+     {!canStartNextDoughBatch&&<p className="dough-timer-warning" role="status">お好み焼きIDの上限に達したため、次の6個区間は開始できません。</p>}
      <button type="button" className="dough-timer-button" disabled={!available||pendingIds.size>0||!canStartNextDoughBatch} onClick={()=>changeDoughBatch("doughReset")}>生地リセット</button>
    </>}
  </section>}
  {__PAGES_MODE__&&kitchen.statusMessage&&<div className="status-banner" role="alert">{kitchen.statusMessage}</div>}
- {__PAGES_MODE__&&kitchen.recoveryAvailable&&<div className="status-banner" role="alert"><span>編集ロックを保持し、端末の保存領域へ書き込める間は、検証済みJSONバックアップから復旧できます。</span> <button className="update-button" onClick={()=>setDataManagementOpen(true)}>バックアップから復旧</button></div>}
+ {__PAGES_MODE__&&kitchen.legacyDoughResetRequired&&<section className="error-panel legacy-dough-reset-panel" role="alert">
+   <strong>旧24個タイマーの未完了セットを検出しました。安全のため調理操作とJSONバックアップの復元を停止しています。</strong>
+   <p>再開するには全体リセットが必要です。盤面・完成ボックス・実行記録・取り消し履歴を消去し、IDを1-1から開始します。</p>
+   {!legacyDoughResetConfirmation
+     ? <button type="button" disabled={!kitchen.legacyDoughResetAvailable||pendingIds.size>0||resetSubmitting.current} onClick={()=>setLegacyDoughResetConfirmation(true)}>全体リセットを確認</button>
+     : <div className="reset-confirmation"><span>保存元を再確認して全データを消去します。この操作は取り消せません。</span><button type="button" className="update-button reset-confirm" disabled={!kitchen.legacyDoughResetAvailable||pendingIds.size>0||resetSubmitting.current} onClick={confirmLegacyDoughReset}>全体リセットを実行</button><button type="button" className="reset-cancel" disabled={pendingIds.size>0||resetSubmitting.current} onClick={()=>{if(!resetSubmitting.current)setLegacyDoughResetConfirmation(false);}}>キャンセル</button></div>}
+   {!kitchen.legacyDoughResetAvailable&&<p>保存元を照合できないため、リセットを実行できません。画面を開き直して状態を確認してください。</p>}
+ </section>}
+ {__PAGES_MODE__&&kitchen.recoveryAvailable&&!kitchen.legacyDoughResetRequired&&<div className="status-banner" role="alert"><span>編集ロックを保持し、端末の保存領域へ書き込める間は、検証済みJSONバックアップから復旧できます。</span> <button className="update-button" onClick={()=>setDataManagementOpen(true)}>バックアップから復旧</button></div>}
  {gridBlocked&&<div className="grid-capacity-warning" role="status">既存の配置数が6マスを超えている鉄板があります。楕円は元の位置のまま保持しています。新規配置と超過している鉄板からの移動はできません。焼き上がった楕円を完成ボックスへ移すと数が減り、両方の鉄板が6枚以下になると残りを自動でマスへ整理します。</div>}
  {__PAGES_MODE__&&kitchen.cacheState==="preparing"&&<div className="status-banner" role="status">オフライン起動用の画面を準備しています。準備が終わるまでインターネット接続を保ってください。</div>}
  {__PAGES_MODE__&&kitchen.cacheState==="unavailable"&&<div className="status-banner" role="status">オフラインで再起動するための保存に失敗しました。アプリを再読み込みして準備状態を確認してください。</div>}
@@ -566,7 +589,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
        </div>;
      })}
    </div>
-   {!plateItems.length&&<div className="empty-plate">{snapshot?<Plus size={30} strokeWidth={1}/>:__PAGES_MODE__&&kitchen.recoveryAvailable?<Database size={25}/>:<LoaderCircle className="animate-spin" size={25}/>}<span>{snapshot?"下段の空きマスをタップして配置":__PAGES_MODE__&&kitchen.recoveryAvailable?"データ管理からバックアップを復旧":__PAGES_MODE__?"保存データを読み込み中":"共有データを読み込み中"}</span></div>}
+   {!plateItems.length&&<div className="empty-plate">{snapshot?<Plus size={30} strokeWidth={1}/>:__PAGES_MODE__&&(kitchen.recoveryAvailable||kitchen.legacyDoughResetRequired)?<Database size={25}/>:<LoaderCircle className="animate-spin" size={25}/>}<span>{snapshot?"下段の空きマスをタップして配置":__PAGES_MODE__&&kitchen.legacyDoughResetRequired?"旧タイマーの全体リセットが必要です":__PAGES_MODE__&&kitchen.recoveryAvailable?"データ管理からバックアップを復旧":__PAGES_MODE__?"保存データを読み込み中":"共有データを読み込み中"}</span></div>}
    </div></article>;
  })}</section>
   {__PAGES_MODE__

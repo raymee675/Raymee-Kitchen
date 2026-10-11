@@ -1,12 +1,19 @@
-import { INITIAL_BOARD_GENERATION, LEGACY_OVAL_RX, LEGACY_OVAL_RY, isPancakeId, normalizeBoardData, type CompletionItem, type DoughBatchState, type ExecutionRecord, type Pancake, type Snapshot, type StoredPancake, type UndoEntry } from "./kitchen-model";
+import { DOUGH_ID_BLOCK_SIZE, INITIAL_BOARD_GENERATION, LEGACY_OVAL_RX, LEGACY_OVAL_RY, isPancakeId, normalizeBoardData, type CompletionItem, type DoughBatchState, type ExecutionRecord, type Pancake, type Snapshot, type StoredPancake, type UndoEntry } from "./kitchen-model";
 
 const siteSegment = typeof window === "undefined"
   ? "root"
   : encodeURIComponent(window.location.pathname.split("/").filter(Boolean)[0] ?? "root");
 export const LOCAL_BOARD_KEY = `teppan-timer:${siteSegment}:single-phone-board:v1`;
-export const LOCAL_BOARD_SCHEMA = 9;
+export const LOCAL_BOARD_SCHEMA = 10;
 export const LOCAL_BACKUP_FORMAT = "teppan-timer-pages-board";
 export const LOCAL_BACKUP_FORMAT_VERSION = 1;
+
+export class LegacyDoughTimerResetRequiredError extends Error {
+  constructor() {
+    super("旧24個タイマーの未完了セットがあります。安全のため操作を停止しました。盤面・完成ボックス・実行記録を含む全体リセットが必要です。");
+    this.name = "LegacyDoughTimerResetRequiredError";
+  }
+}
 
 type StoredBoard = {
   schemaVersion: number;
@@ -86,6 +93,7 @@ function decode(raw: string | null): StoredBoard {
     ids.add(item.id);
   }
 
+  const legacyDoughSchema = schemaVersion >= 7 && schemaVersion < LOCAL_BOARD_SCHEMA;
   const board = normalizeBoardData({
     items:rawItems,
     records:rawRecords,
@@ -95,14 +103,24 @@ function decode(raw: string | null): StoredBoard {
     nextCreationOrdinal:schemaVersion >= 8 ? rawNextCreationOrdinal : undefined,
     undoHistory:rawUndoHistory,
     doughBatch:schemaVersion >= 7 ? (value as Record<string, unknown>).doughBatch : null,
+    doughBatchSize:legacyDoughSchema ? DOUGH_ID_BLOCK_SIZE : undefined,
     strictEntityMetadata:schemaVersion >= 8,
     strictPublicIds:schemaVersion >= 8,
   });
+  let doughBatch = board.doughBatch ?? null;
+  if (legacyDoughSchema && doughBatch) {
+    if (doughBatch.placedEntityKeys.length !== DOUGH_ID_BLOCK_SIZE || doughBatch.completedAt === null) {
+      throw new LegacyDoughTimerResetRequiredError();
+    }
+    // A completed old batch consumed its whole 24-ID block. Keep all board
+    // data and the ID high-water mark, but start the new timer unstarted.
+    doughBatch = null;
+  }
   return {
     schemaVersion: LOCAL_BOARD_SCHEMA,
     revision: revision as number,
     ...board,
-    doughBatch:board.doughBatch ?? null,
+    doughBatch,
   };
 }
 
@@ -193,4 +211,52 @@ export function readLocalBoard(storage: BoardStorage = window.localStorage): Sna
 
 export function writeLocalBoard(snapshot: Snapshot, storage: Pick<Storage, "setItem"> = window.localStorage): void {
   storage.setItem(LOCAL_BOARD_KEY, JSON.stringify(toStoredBoard(snapshot)));
+}
+
+export function resetUnreadableLegacyDoughBoard(expectedRaw: string, storage: Pick<Storage, "getItem" | "setItem"> = window.localStorage): Snapshot {
+  const currentRaw = storage.getItem(LOCAL_BOARD_KEY);
+  if (currentRaw === null || currentRaw !== expectedRaw) {
+    throw new Error("保存データが変わっています。画面を開き直して状態を確認してください。");
+  }
+
+  let rawBoard: unknown;
+  try {
+    rawBoard = JSON.parse(currentRaw);
+  } catch {
+    throw new Error("旧生地タイマーの保存状態を確認できません。データは変更していません。");
+  }
+  if (!isRecord(rawBoard)
+    || !Number.isSafeInteger(rawBoard.schemaVersion) || (rawBoard.schemaVersion as number) < 7 || (rawBoard.schemaVersion as number) >= LOCAL_BOARD_SCHEMA
+    || !isRecord(rawBoard.doughBatch)
+    || !Array.isArray(rawBoard.doughBatch.placedEntityKeys) && !Array.isArray(rawBoard.doughBatch.placedIds)) {
+    throw new Error("旧生地タイマーの保存状態を確認できません。データは変更していません。");
+  }
+  const placedKeys = Array.isArray(rawBoard.doughBatch.placedEntityKeys)
+    ? rawBoard.doughBatch.placedEntityKeys
+    : rawBoard.doughBatch.placedIds as unknown[];
+  if (placedKeys.length >= DOUGH_ID_BLOCK_SIZE || rawBoard.doughBatch.completedAt !== null) {
+    throw new Error("全体リセットの対象となる旧生地タイマーを確認できません。データは変更していません。");
+  }
+  const revision = rawBoard.revision;
+  const generation = rawBoard.generation;
+  if (!Number.isSafeInteger(revision) || (revision as number) < 0 || !Number.isSafeInteger(generation) || (generation as number) < INITIAL_BOARD_GENERATION
+    || (revision as number) >= Number.MAX_SAFE_INTEGER || (generation as number) >= Number.MAX_SAFE_INTEGER) {
+    throw new Error("盤面の更新番号を確認できないため、全体リセットできません。データは変更していません。");
+  }
+
+  const now = Date.now();
+  const reset: Snapshot = {
+    revision:(revision as number) + 1,
+    generation:(generation as number) + 1,
+    items:[],
+    records:[],
+    completionItems:[],
+    nextPancakeOrdinal:1,
+    nextCreationOrdinal:1,
+    undoHistory:[],
+    doughBatch:null,
+    serverNow:now,
+  };
+  writeLocalBoard(reset, storage);
+  return reset;
 }
