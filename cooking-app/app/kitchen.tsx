@@ -6,7 +6,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
 import { useKitchen } from "@/lib/use-kitchen";
 import { useKitchenLocal } from "@/lib/use-kitchen-local";
-import { DOUGH_ID_BLOCK_SIZE, DOUGH_TIMER_BATCH_SIZE, GRID_CELLS, GRID_COLUMNS, GRID_ROWS, MAX_PANCAKE_IDS, OVAL_RX, OVAL_RY, completionStatus, completionTimer, doughBatchStatus, gridCellAt, gridMoveBlockReason, isGridCellActuallyOccupied, isGridCellOccupied, isGridOverCapacity, nearestGridCell, nextDoughBatchFirstOrdinal, pancakeIdForOrdinal, timer, parseCommand, type GridMoveBlockReason, type Pancake, type Command, type Snapshot } from "@/lib/kitchen-model";
+import { DOUGH_ID_BLOCK_SIZE, DOUGH_TIMER_BATCH_SIZE, GRID_CELLS, GRID_COLUMNS, GRID_ROWS, MAX_PANCAKE_IDS, OVAL_RX, OVAL_RY, completionStatus, completionTimer, doughBatchStatus, gridCellAt, gridMoveBlockReason, isGridCellActuallyOccupied, isGridCellOccupied, isGridOverCapacity, nearestGridCell, nextDoughBatchFirstOrdinal, pancakeIdForOrdinal, timer, parseCommand, type GridMoveBlockReason, type Pancake, type Command, type ExecutionRecord, type Snapshot } from "@/lib/kitchen-model";
 import { downloadExecutionRecords } from "@/lib/execution-record-export";
 import { createLocalBoardBackup, parseLocalBoardBackup, type ParsedLocalBoardBackup } from "@/lib/local-kitchen-storage";
 import { createUuid } from "@/lib/uuid";
@@ -62,6 +62,53 @@ function gridMoveBlockMessage(reason:GridMoveBlockReason|null) {
  return reason?messages[reason]:"このマスへは移動できません。";
 }
 
+type DeliveryStatus = "served" | "available" | "unavailable" | "unprepared";
+type DeliverySearchMatch = {entityKey:string; sources:Set<"画面ID"|"記録ID">; status:DeliveryStatus};
+
+function deliveryStatus(record:ExecutionRecord|undefined,inCompletionBox:boolean,now:number):DeliveryStatus {
+ if(!record)return "unprepared";
+ const state=completionStatus(record,now);
+ if(state==="served")return "served";
+ if(state==="unavailable"&&record.serveTimerStartedAt!==null&&record.serveDeadlineAt!==null)return "unavailable";
+ if(state==="holding"&&inCompletionBox)return "available";
+ return "unprepared";
+}
+
+function findDeliverySearchMatches(snapshot:Snapshot,searchId:string,now:number):DeliverySearchMatch[] {
+ const normalizedId=searchId.trim().toLowerCase();
+ const recordsByEntityKey=new Map(snapshot.records.map(record=>[record.entityKey,record]));
+ const completionEntityKeys=new Set(snapshot.completionItems.map(item=>item.entityKey));
+ const matchesByEntityKey=new Map<string,DeliverySearchMatch>();
+ const addMatch=(entityKey:string,status:DeliveryStatus,source:"画面ID"|"記録ID")=>{
+   const existing=matchesByEntityKey.get(entityKey);
+   if(existing)existing.sources.add(source);
+   else matchesByEntityKey.set(entityKey,{entityKey,status,sources:new Set([source])});
+ };
+
+ for(const item of snapshot.items){
+   if(item.id.toLowerCase()===normalizedId)addMatch(item.entityKey,"unprepared","画面ID");
+   if(item.archiveId.toLowerCase()===normalizedId)addMatch(item.entityKey,"unprepared","記録ID");
+ }
+ for(const item of snapshot.completionItems){
+   if(item.id.toLowerCase()!==normalizedId)continue;
+   addMatch(item.entityKey,deliveryStatus(recordsByEntityKey.get(item.entityKey),true,now),"画面ID");
+ }
+ for(const record of snapshot.records){
+   if(record.id.toLowerCase()!==normalizedId)continue;
+   addMatch(record.entityKey,deliveryStatus(record,completionEntityKeys.has(record.entityKey),now),"記録ID");
+ }
+
+ if(matchesByEntityKey.size===0)return [{entityKey:"unmatched",status:"unprepared",sources:new Set()}];
+ return [...matchesByEntityKey.values()];
+}
+
+const deliveryStatusLabels:Record<DeliveryStatus,string>={
+ served:"提供済み",
+ available:"提供可能",
+ unavailable:"提供不可能",
+ unprepared:"未準備",
+};
+
 function useScreenWakeLock(enabled:boolean) {
  const [state,setState]=useState<"idle"|"active"|"unavailable">("idle");
  const token=useRef<ScreenWakeLockToken|null>(null);
@@ -98,6 +145,10 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  const [backupReading,setBackupReading] = useState(false);
  const [resetConfirmation,setResetConfirmation] = useState(false);
  const [legacyDoughResetConfirmation,setLegacyDoughResetConfirmation] = useState(false);
+ const [deliverySearchInput,setDeliverySearchInput] = useState("");
+ const [deliverySearchId,setDeliverySearchId] = useState("");
+ const [recallM,setRecallM] = useState(1);
+ const [recallN,setRecallN] = useState(1);
  const resetSubmitting=useRef(false);
  const contact = useRef<Contact|null>(null);
  const backupFileInput = useRef<HTMLInputElement|null>(null);
@@ -124,6 +175,9 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  const items = snapshot?.items ?? [];
  const gridBlocked = isGridOverCapacity(items);
  const completionItems = snapshot?.completionItems ?? [];
+ const recalledItems = completionItems.filter(item=>item.isRecalled!==false);
+ const recallId = `${recallM}-${recallN}`;
+ const recallTarget = completionItems.find(item=>item.id===recallId);
  const doughBatch = __PAGES_MODE__ ? snapshot?.doughBatch ?? null : null;
  const doughStatus = doughBatchStatus(doughBatch,now);
  const nextDoughFirstOrdinal = (doughStatus==="expired"||doughStatus==="complete")&&doughBatch
@@ -142,6 +196,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  items.forEach(item=>counts[timer(item,now).state]++);
   const records = snapshot?.records ?? [];
   const recordsByEntityKey = new Map(records.map(record=>[record.entityKey,record]));
+  const deliverySearchMatches = deliverySearchId&&snapshot ? findDeliverySearchMatches(snapshot,deliverySearchId,now) : [];
   const isItemPending=(item:{id:string;entityKey:string})=>pendingIds.has(__PAGES_MODE__?item.entityKey:item.id);
   const wakeLock=useScreenWakeLock(__PAGES_MODE__&&counts.running>0);
 
@@ -152,11 +207,11 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    const register = (tool:Record<string,unknown>) => {
      try { void Promise.resolve(context.registerTool(tool,{signal:lifecycle.signal})).catch(()=>{}); } catch {}
    };
-   register({name:"read_kitchen",title:"鉄板の状態を確認",description:"共有されている2枚の鉄板、お好み焼きの位置・温度・固定90秒タイマー、完成ボックスと30分期限、および実行記録を取得します。",inputSchema:{type:"object",properties:{},additionalProperties:false},annotations:{readOnlyHint:true},execute:async()=>{
+   register({name:"read_kitchen",title:"鉄板の状態を確認",description:"共有されている2枚の鉄板、お好み焼きの位置・温度・固定90秒タイマー、内部で保管する完成品（isRecalledがtrueなら表示中）と30分期限、および実行記録を取得します。",inputSchema:{type:"object",properties:{},additionalProperties:false},annotations:{readOnlyHint:true},execute:async()=>{
      await actions.current.sync();
      return actions.current.getSnapshot();
    }});
-   register({name:"operate_kitchen",title:"お好み焼きを操作",description:"楕円の追加(create)、固定90秒計測の開始(start)、温度を1℃変更(adjust)、同じ鉄板の下段から同じ列の空いた上段への移動(move)、焼き上がり楕円の完成ボックス移動(remove)、完成ボックス項目の提供/提供不可確定(remove)、直近の配置・移動の取り消し(undo)を実行します。新規配置は下段の空きマスのみです。画面では下段の待機中楕円は、同じ列の上段が空いていれば最初のタップでタイマーを始めず上段へ移動し、上段でタップすると計測を開始します。上段が使用中なら下段でタップして計測を開始します。下段の調理中の楕円をタップすると同じ鉄板・同じ列の空いた上段へ移動します。上段は下段からの上向き移動先専用です。上段からの移動、左右・同段・鉄板間の移動はできません。取り消しは直近50件までで、タイマー開始・温度変更・完成ボックス移動・提供操作を行うと、それ以前の取り消し履歴は消えます。画面と同じ共有データを変更します。operationIdはUUID v4です。read_kitchenで取得したgenerationをexpectedGenerationに必ず指定してください。undoではread_kitchenのundoHistory末尾にあるoperationIdをexpectedUndoOperationIdへ指定します。createでは下段の座標を指定し、idは指定せず、配置順に採番します。他の操作には対象のidと取得したversionをexpectedVersionで指定します。",inputSchema:{type:"object",properties:{operationId:{type:"string"},expectedGeneration:{type:"integer",minimum:0},type:{enum:["create","start","adjust","move","remove","undo"]},id:{type:"string"},plate:{enum:[1,2]},x:{type:"number",minimum:0,maximum:1},y:{type:"number",minimum:0,maximum:1},expectedVersion:{type:"integer",minimum:1},expectedUndoOperationId:{type:"string"},delta:{enum:[-1,1]}},required:["operationId","type","expectedGeneration"],additionalProperties:false},annotations:{readOnlyHint:false},execute:async(input:unknown)=>{
+   register({name:"operate_kitchen",title:"お好み焼きを操作",description:"楕円の追加(create)、固定90秒計測の開始(start)、温度を1℃変更(adjust)、同じ鉄板の下段から同じ列の空いた上段への移動(move)、焼き上がり楕円の回収と内部30分計測開始(remove)、現在の画面IDの完成品タイマー呼び出し(recall)、表示した完成品の提供/提供不可確定(remove)、直近の配置・移動の取り消し(undo)を実行します。新規配置は下段の空きマスのみです。画面では下段の待機中楕円は、同じ列の上段が空いていれば最初のタップでタイマーを始めず上段へ移動し、上段でタップすると計測を開始します。上段が使用中なら下段でタップして計測を開始します。下段の調理中の楕円をタップすると同じ鉄板・同じ列の空いた上段へ移動します。上段は下段からの上向き移動先専用です。上段からの移動、左右・同段・鉄板間の移動はできません。取り消しは直近50件までで、タイマー開始・温度変更・完成ボックス移動・提供操作を行うと、それ以前の取り消し履歴は消えます。画面と同じ共有データを変更します。operationIdはUUID v4です。read_kitchenで取得したgenerationをexpectedGenerationに必ず指定してください。undoではread_kitchenのundoHistory末尾にあるoperationIdをexpectedUndoOperationIdへ指定します。createでは下段の座標を指定し、idは指定せず、配置順に採番します。他の操作には対象のidと取得したversionをexpectedVersionで指定します。recallでは対象のentityKeyをexpectedEntityKeyへ必ず指定します。呼び出しはisRecalledだけを変更し、期限と提供状態は変えません。",inputSchema:{type:"object",properties:{operationId:{type:"string"},expectedGeneration:{type:"integer",minimum:0},type:{enum:["create","start","adjust","move","remove","recall","undo"]},id:{type:"string"},plate:{enum:[1,2]},x:{type:"number",minimum:0,maximum:1},y:{type:"number",minimum:0,maximum:1},expectedVersion:{type:"integer",minimum:1},expectedEntityKey:{type:"string"},expectedUndoOperationId:{type:"string"},delta:{enum:[-1,1]}},required:["operationId","type","expectedGeneration"],additionalProperties:false},annotations:{readOnlyHint:false},execute:async(input:unknown)=>{
      const command = parseCommand(input);
      if(command.expectedGeneration===undefined) throw new Error("read_kitchenで取得したgenerationをexpectedGenerationに指定してください。");
      const result = await actions.current.send({...command,expectedGeneration:command.expectedGeneration});
@@ -173,14 +228,15 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    try { operation=send(command); }
    catch(error) { toast.error(error instanceof Error?error.message:"操作を保存できませんでした。"); return; }
    void operation.then(result=>{
-   if(command.type==="adjust") { const item=result.items.find(i=>i.id===command.id); if(item) toast.success(`温度を${item.temperature}℃に変更しました。`,{duration:1800}); }
+   if(command.type==="adjust") { const item=result.items.find(i=>i.id===command.id); if(item) toast.success(`温度を${item.temperature}℃に変更しました。`,{duration:400}); }
    else if(command.type==="move") { const item=result.items.find(i=>i.id===command.id); if(item) toast.success("真上のマスへ移動しました。",{duration:1800}); }
    else if(command.type==="remove") {
      const record=targetEntityKey ? result.records.find(item=>item.entityKey===targetEntityKey) : undefined;
-     if(targetEntityKey && result.completionItems.some(item=>item.entityKey===targetEntityKey)) toast.success("完成ボックスに移しました。",{duration:1800});
+     if(targetEntityKey && result.completionItems.some(item=>item.entityKey===targetEntityKey)) toast.success("30分の提供タイマーを内部で開始しました。IDを指定して呼び出せます。",{duration:2400});
      else if(record?.servedAt!==null&&record?.servedAt!==undefined) toast.success("提供済みにしました。",{duration:1800});
      else if(record?.unavailableAt!==null&&record?.unavailableAt!==undefined) toast.success("提供不可として記録しました。",{duration:1800});
    }
+   else if(command.type==="recall") toast.success(`ID ${command.id} の提供タイマーを呼び出しました。`,{duration:1800});
    else if(command.type==="undo") toast.success("直前の操作を取り消しました。",{duration:1800});
     else if(command.type==="delete") toast.success("楕円を削除しました。必要なら「操作を取り消す」で戻せます。",{duration:2200});
    else if(command.type==="doughStart") toast.success(`生地タイマーを開始しました。記録ID ${pancakeOrdinalLabel(result.doughBatch?.firstPancakeOrdinal ?? 1)}から6個分の20分です。`,{duration:2400});
@@ -463,7 +519,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
     </DialogContent>
   </Dialog>}
   <Dialog open={help} onOpenChange={setHelp}><DialogTrigger asChild><button className="icon-button" aria-label="使い方"><CircleHelp size={21}/></button></DialogTrigger><DialogContent className="help-dialog"><DialogHeader><DialogTitle>鉄板タイマーの使い方</DialogTitle><DialogDescription>{__PAGES_MODE__?"調理状態は、このスマートフォンのこのブラウザー内だけに保存されます。":"同じ画面を開いたスマホで、調理の状態を共有できます。"}</DialogDescription></DialogHeader>
-  <ol className="help-list"><li>鉄板は縦2行・横3列の6マスです。新しい楕円は下段の空きマスをタップして配置します。上段は、下段から移動した楕円だけを置ける移動先専用です。</li><li>下段の待機中の楕円は、同じ鉄板・同じ列の上段が空いていればタップで上段へ移動します。上段が埋まっている場合は計測を始めます。移動できない配置の場合は元の場所に残り、理由を表示します。上段の待機中の楕円をタップすると固定90秒の計測が始まります。調理中の下段の楕円をタップすると、同じ鉄板・同じ列の真上にある空き上段マスへ移動します。移動先が使用中、または鉄板が過密の場合は移動せず、理由を表示します。上段の楕円は移動できません。</li>{__PAGES_MODE__&&<li>盤面から楕円を削除するには、楕円を450ミリ秒以上長押ししてから鉄板の外へドラッグし、外で離します。鉄板の上で離すと削除をキャンセルします。削除は「操作を取り消す」で元に戻せます。</li>}<li>楕円の左右にある矢印をタップすると、待機中・計測中の温度を1℃ずつ変更できます。焼き上がり後は変更できません。初期値は96℃です。この温度は設定・記録用で、センサーの実測値ではありません。計測時間は常に90秒です。</li><li>残り0秒で楕円が赤くなります。赤い楕円をタップすると完成ボックスへ移り、30分の保管タイマーが始まります。期限前に完成ボックスをタップすると提供済みになり、期限後は「提供不可」として履歴に残して取り出せます。</li>{__PAGES_MODE__&&<li>生地タイマーは「生地を取り出す」で開始する20分タイマーです。鉄板への新規配置が保存された時だけ6個の残数が減り、加熱開始や移動では減りません。20分を過ぎたら新規配置を停止し、残りを廃棄して次の6個区間を開始します。6個を置き切った後は「生地リセット」で次の6個分を開始できます。24個のID区間は6個ずつ4回のタイマーで使い切ります。90秒の加熱タイマーとは別です。</li>}</ol>
+  <ol className="help-list"><li>鉄板は縦2行・横3列の6マスです。新しい楕円は下段の空きマスをタップして配置します。上段は、下段から移動した楕円だけを置ける移動先専用です。</li><li>下段の待機中の楕円は、同じ鉄板・同じ列の上段が空いていればタップで上段へ移動します。上段が埋まっている場合は計測を始めます。移動できない配置の場合は元の場所に残り、理由を表示します。上段の待機中の楕円をタップすると固定90秒の計測が始まります。調理中の下段の楕円をタップすると、同じ鉄板・同じ列の真上にある空き上段マスへ移動します。移動先が使用中、または鉄板が過密の場合は移動せず、理由を表示します。上段の楕円は移動できません。</li>{__PAGES_MODE__&&<li>盤面から楕円を削除するには、楕円を450ミリ秒以上長押ししてから鉄板の外へドラッグし、外で離します。鉄板の上で離すと削除をキャンセルします。削除は「操作を取り消す」で元に戻せます。</li>}<li>楕円の左右にある矢印をタップすると、待機中・計測中の温度を1℃ずつ変更できます。焼き上がり後は変更できません。初期値は96℃です。この温度は設定・記録用で、センサーの実測値ではありません。計測時間は常に90秒です。</li><li>残り0秒で楕円が赤くなります。赤い楕円をタップすると回収し、内部で30分の提供タイマーが始まります。完成ボックスの呼び出しアイコンで、上の左右矢印でm、下の左右矢印でnを選び、中央をタップすると現在の画面IDの完成品を表示します。呼び出しても期限は延長されません。期限前は「提供可能」、期限以降は「提供不可」です。表示したカードをタップすると、期限前は提供済み、期限後は提供不可として記録し、取り出せます。</li>{__PAGES_MODE__&&<li>生地タイマーは「生地を取り出す」で開始する20分タイマーです。鉄板への新規配置が保存された時だけ6個の残数が減り、加熱開始や移動では減りません。20分を過ぎたら新規配置を停止し、残りを廃棄して次の6個区間を開始します。6個を置き切った後は「生地リセット」で次の6個分を開始できます。24個のID区間は6個ずつ4回のタイマーで使い切ります。90秒の加熱タイマーとは別です。</li>}</ol>
   <p className="help-note">「操作を取り消す」では直近50件までの楕円配置・鉄板上の移動・盤外削除を操作順に戻せます。タイマー開始、温度変更、完成ボックスへの移動、提供・提供不可の確定を行うと、それ以前の取り消し履歴は消えます。過密な旧データは位置を保って表示し、新規配置とその鉄板にある楕円の移動はできません。</p>
   <p className="help-note">実行記録CSVは安定した記録IDごとに1行です。CSVの「お好み焼きID」は記録作成時の番号を保持するため、削除後に画面で詰め直された表示IDと異なる場合があります。列名と列数は変わりません。鉄板投入時刻は配置の保存時、下段→上段移動時刻は移動の保存時に記録します。以前のデータなど時刻を取得できない場合は空欄です。移動を取り消すと移動時刻も取り消されます。「温度区間(℃・開始順)」と「区間加熱秒数(開始順)」は開始順のリストで、各位置が対応します。区切りは「 | 」で、温度不明の区間も対応する秒数と同じ位置に残ります。合計秒数と焼き上がり・保管・提供の時刻、最終ステータスも記録ごとに1回出力します。</p>
   {__PAGES_MODE__?<>
@@ -519,9 +575,53 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  {!__PAGES_MODE__&&connection==="unauthorized" && <div className="status-banner">この端末は未登録か、利用期限が切れています。<a href="/register">登録画面を開いてください</a> 管理者から登録コードを受け取ってください。</div>}
  {!__PAGES_MODE__&&connection==="offline" && <div className="status-banner" role="status">接続を確認しています。現在は表示のみです。 <button onClick={()=>void sync()}>再接続</button></div>}
   <section id="completion-box" tabIndex={-1} className="completion-box" aria-label="お好み焼き完成ボックス">
-   <header className="completion-box-heading"><div><h2>完成ボックス</h2><p>赤くなったお好み焼きは30分以内に提供</p></div><span>{completionItems.length} 個</span></header>
+   <header className="completion-box-heading"><div><h2>完成ボックス</h2><p>回収から30分以内に提供。必要なIDのタイマーを呼び出してください。</p></div><span>表示 {recalledItems.length} / 保管 {completionItems.length} 個</span></header>
+   <div className="timer-recall" role="group" aria-label="30分タイマー呼び出し">
+     <div className="timer-recall-icon">
+       <button className="timer-recall-center" type="button" disabled={!available||(recallTarget?isItemPending(recallTarget):false)} aria-label={`ID ${recallId} の30分タイマーを呼び出す`} onClick={()=>{
+         if(!available)return;
+         if(!recallTarget){
+           toast.error(items.some(item=>item.id===recallId)?"このIDはまだ回収されていません。赤い楕円をタップして回収してください。":"この画面IDの完成品はありません。提供済みの確認は下のID検索を使ってください。");
+           return;
+         }
+         if(recallTarget.isRecalled!==false){toast.info("この完成品はすでに表示されています。");return;}
+         run({operationId:createUuid(),type:"recall",id:recallTarget.id,expectedEntityKey:recallTarget.entityKey,expectedVersion:recallTarget.version});
+       }}><small>30分タイマー</small><strong>{recallId}</strong><span>タップで呼び出す</span></button>
+       <div className="timer-recall-arrows timer-recall-m">
+         <button type="button" aria-label="IDのmを1減らす" disabled={!available||recallM===1} onClick={()=>setRecallM(value=>Math.max(1,value-1))}><ArrowLeft size={18}/></button>
+         <span>m</span>
+         <button type="button" aria-label="IDのmを1増やす" disabled={!available||recallM===MAX_PANCAKE_IDS/DOUGH_ID_BLOCK_SIZE} onClick={()=>setRecallM(value=>Math.min(MAX_PANCAKE_IDS/DOUGH_ID_BLOCK_SIZE,value+1))}><ArrowRight size={18}/></button>
+       </div>
+       <div className="timer-recall-arrows timer-recall-n">
+         <button type="button" aria-label="IDのnを1減らす" disabled={!available||recallN===1} onClick={()=>setRecallN(value=>Math.max(1,value-1))}><ArrowLeft size={18}/></button>
+         <span>n</span>
+         <button type="button" aria-label="IDのnを1増やす" disabled={!available||recallN===DOUGH_ID_BLOCK_SIZE} onClick={()=>setRecallN(value=>Math.min(DOUGH_ID_BLOCK_SIZE,value+1))}><ArrowRight size={18}/></button>
+       </div>
+     </div>
+     <p>上の矢印で m、下の矢印で n を選択。中央をタップすると完成品を表示します。<br/>呼び出す前から計測中です。呼び出しても残り時間は戻りません。<br/><small>現在の画面IDを指定してください。提供・削除後はIDが詰め直されます。</small></p>
+   </div>
+   <form className="delivery-search" onSubmit={event=>{event.preventDefault();setDeliverySearchId(deliverySearchInput.trim());}}>
+     <label htmlFor="delivery-status-search">IDで提供状況を検索</label>
+     <div className="delivery-search-controls"><input id="delivery-status-search" type="text" value={deliverySearchInput} onChange={event=>{setDeliverySearchInput(event.target.value);setDeliverySearchId("");}} placeholder="例：1-1" autoComplete="off" disabled={!snapshot}/><button type="submit" disabled={!snapshot||!deliverySearchInput.trim()}>検索</button></div>
+     <small>画面IDまたはCSVの記録IDを入力してください。</small>
+   </form>
+   {deliverySearchId&&<div className="delivery-search-results" role="status" aria-live="polite">
+     <p>検索ID：<code>{deliverySearchId}</code></p>
+     {deliverySearchMatches.map(match=>{
+       const sources=[...match.sources];
+       const detail=match.status==="served"?"提供済みとして記録されています。"
+         :match.status==="available"?"内部で保管中で、提供期限前です。"
+         :match.status==="unavailable"?"30分のタイマー期限が切れています。"
+         :"完成ボックス内にありません。";
+       return <div key={match.entityKey} className={`delivery-search-result is-${match.status}`}>
+         <span>{sources.length?`${sources.join("・")} `:"入力ID "}{deliverySearchId}</span>
+         <strong>{deliveryStatusLabels[match.status]}</strong>
+         <small>{detail}</small>
+       </div>;
+     })}
+   </div>}
    <div className="completion-list" role="list">
-     {completionItems.map(boxItem=>{
+     {recalledItems.map(boxItem=>{
        const record=recordsByEntityKey.get(boxItem.entityKey);
        if(!record)return null;
        const outcome=completionStatus(record,now);
@@ -534,10 +634,10 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
        return <button key={boxItem.entityKey} type="button" role="listitem" title={`お好み焼きID: ${boxItem.id}`} className={`completion-card ${unavailable?"unavailable":""} ${isItemPending(boxItem)?"pending":""}`} disabled={!available||isItemPending(boxItem)} aria-label={`お好み焼きID ${boxItem.id}、${label}。タップして${unavailable?"提供不可として取り出す":"提供済みにする"}`} onClick={()=>run({operationId:createUuid(),type:"remove",id:boxItem.id,expectedVersion:boxItem.version})}>
          <span className="completion-card-id">{boxItem.id}</span>
          <strong>{label}</strong>
-         <small>{unavailable?"期限切れ":`期限 ${deadline}`}</small>
+         <small>{unavailable?"期限切れ":`提供可能・期限 ${deadline}`}</small>
        </button>;
      })}
-     {!completionItems.length&&<p className="completion-empty">赤い楕円をタップすると、ここに移ります。</p>}
+     {!recalledItems.length&&<p className="completion-empty">表示中のタイマーはありません。赤い楕円を回収後、上のアイコンでIDを指定して呼び出してください。</p>}
    </div>
   </section>
   {__PAGES_MODE__&&completionItems.length>0&&<div className="pages-completion-shortcut"><a href="#completion-box" aria-label={`完成ボックスへ。${completionItems.length}個あります。`}><ArrowUp size={16} aria-hidden="true"/><span>完成ボックスへ <b>{completionItems.length}</b></span></a></div>}
@@ -565,7 +665,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
       return <g key={item.entityKey} data-item-key={item.entityKey} data-item-id={item.id} data-plate={plate} data-state={t.state} data-duration="90" data-temperature={item.temperature} data-version={item.version} className={`oval ${busy?"pending":""}${longPressArmed?" long-press-armed":""}${deleteDragging?" delete-dragging":""}`}>
        <title>{`お好み焼きID: ${item.id}`}</title>
         <defs><clipPath id={`clip-${item.entityKey}`}><ellipse cx={cx} cy={cy} rx={rx} ry={ry}/></clipPath></defs>
-        <ellipse role="button" tabIndex={0} aria-disabled={!available||busy} aria-label={`お好み焼きID ${item.id}、${t.state==="blank"?`待機中、温度${item.temperature}度、${blankTapInstruction}`:t.state==="done"?`焼き上がり、温度${item.temperature}度、タップで完成ボックスに移動`:lowerRow?`調理中、残り${t.remaining}秒、温度${item.temperature}度、タップで真上の空きマスへ移動`:`調理中、残り${t.remaining}秒、温度${item.temperature}度、上段からは移動できません`}${__PAGES_MODE__?"。450ミリ秒以上長押しして鉄板の外で離すと削除できます。":""}`} cx={cx} cy={cy} rx={rx} ry={ry} fill={t.state==="done"?"#e13b3b":t.state==="blank"?"#fff":"#0c0d0f"} stroke={pressed===item.entityKey?"#ffb276":"#92989f"} strokeWidth={pressed===item.entityKey?9:4} onKeyDown={e=>keyboard(e,item)}/>
+        <ellipse role="button" tabIndex={0} aria-disabled={!available||busy} aria-label={`お好み焼きID ${item.id}、${t.state==="blank"?`待機中、温度${item.temperature}度、${blankTapInstruction}`:t.state==="done"?`焼き上がり、温度${item.temperature}度、タップで回収し30分の内部計測を開始`:lowerRow?`調理中、残り${t.remaining}秒、温度${item.temperature}度、タップで真上の空きマスへ移動`:`調理中、残り${t.remaining}秒、温度${item.temperature}度、上段からは移動できません`}${__PAGES_MODE__?"。450ミリ秒以上長押しして鉄板の外で離すと削除できます。":""}`} cx={cx} cy={cy} rx={rx} ry={ry} fill={t.state==="done"?"#e13b3b":t.state==="blank"?"#fff":"#0c0d0f"} stroke={pressed===item.entityKey?"#ffb276":"#92989f"} strokeWidth={pressed===item.entityKey?9:4} onKeyDown={e=>keyboard(e,item)}/>
         {t.state==="running"&&<rect x={cx-rx} y={cy-ry} width={rx*2} height={ry*2*t.progress} fill="#fff" clipPath={`url(#clip-${item.entityKey})`} pointerEvents="none"/>}
        {t.state!=="blank"&&<text x={cx} y={timerY} textAnchor="middle" className="oval-number" fontSize="66" fill={t.state==="done"?"#fff":t.progress>(lowerRow?0.16:0.84)?"#16191e":"#fff"} pointerEvents="none">{t.remaining}</text>}
        {t.state!=="done"&&<>
@@ -597,8 +697,8 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    </div></article>;
  })}</section>
   {__PAGES_MODE__
-    ? <footer className="guide pages-guide"><div><span className="guide-mark">1</span><span>下段の空きマスをタップ<b>新しい楕円を置く</b></span></div><div><span className="guide-mark">白</span><span>白い上段楕円をタップ<b>90秒計測を開始</b></span></div><div><span className="guide-mark">移</span><span>下段の楕円をタップ<b>待機中は空き上段へ、調理中も真上へ</b></span></div><div><span className="guide-red-dot" aria-hidden="true"/><span>赤い楕円をタップ<b>完成ボックスへ</b></span></div><div><span className="guide-mark">30</span><span>完成ボックスをタップ<b>提供済み／提供不可</b></span></div><p>上段に空きがない下段の待機中楕円はタップで計測を開始します。楕円の左右にある矢印で、待機中・計測中の温度を1℃ずつ調節できます。焼き上がり後は変更できません。温度は記録用（実測値ではありません）で、計測時間は固定90秒です。</p></footer>
-    : <footer className="guide"><div><span className="guide-mark">1</span><span>下段の楕円をタップ<b>空白は配置、待機中は空き上段へ、調理中は真上へ</b></span></div><div><span className="guide-arrows"><ArrowLeft size={19}/><ArrowRight size={19}/></span><span>左右の矢印をタップ<b>温度を1℃調整</b></span></div><div><span className="guide-red-dot" aria-hidden="true"/><span>赤い楕円をタップ<b>完成ボックスへ</b></span></div><div><span className="guide-mark">30</span><span>完成ボックスをタップ<b>提供/提供不可</b></span></div></footer>}
+    ? <footer className="guide pages-guide"><div><span className="guide-mark">1</span><span>下段の空きマスをタップ<b>新しい楕円を置く</b></span></div><div><span className="guide-mark">白</span><span>白い上段楕円をタップ<b>90秒計測を開始</b></span></div><div><span className="guide-mark">移</span><span>下段の楕円をタップ<b>待機中は空き上段へ、調理中も真上へ</b></span></div><div><span className="guide-red-dot" aria-hidden="true"/><span>赤い楕円をタップ<b>回収して内部30分計測</b></span></div><div><span className="guide-mark">30</span><span>IDで呼び出し、カードをタップ<b>提供済み／提供不可</b></span></div><p>上段に空きがない下段の待機中楕円はタップで計測を開始します。楕円の左右にある矢印で、待機中・計測中の温度を1℃ずつ調節できます。焼き上がり後は変更できません。温度は記録用（実測値ではありません）で、計測時間は固定90秒です。</p></footer>
+    : <footer className="guide"><div><span className="guide-mark">1</span><span>下段の楕円をタップ<b>空白は配置、待機中は空き上段へ、調理中は真上へ</b></span></div><div><span className="guide-arrows"><ArrowLeft size={19}/><ArrowRight size={19}/></span><span>左右の矢印をタップ<b>温度を1℃調整</b></span></div><div><span className="guide-red-dot" aria-hidden="true"/><span>赤い楕円をタップ<b>回収して内部30分計測</b></span></div><div><span className="guide-mark">30</span><span>IDで呼び出し、カードをタップ<b>提供/提供不可</b></span></div></footer>}
  </main>;
 }
 

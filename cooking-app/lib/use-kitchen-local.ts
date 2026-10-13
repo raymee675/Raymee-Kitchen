@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { applySnapshotCommand, parseCommand, type Command, type Snapshot } from "./kitchen-model";
+import { createLocalTimestampClock } from "./local-timestamp-clock";
 import { LegacyDoughTimerResetRequiredError, LOCAL_BOARD_KEY, readLocalBoard, resetUnreadableLegacyDoughBoard, writeLocalBoard, type ParsedLocalBoardBackup } from "./local-kitchen-storage";
 
 const EDITOR_LOCK = `${LOCAL_BOARD_KEY}:editor`;
@@ -33,12 +34,16 @@ export function useKitchenLocal() {
   const mutationQueue = useRef(Promise.resolve());
   const registration = useRef<ServiceWorkerRegistration | null>(null);
   const updateRequested = useRef(false);
+  const clock = useRef<ReturnType<typeof createLocalTimestampClock> | null>(null);
+  if (clock.current === null) clock.current = createLocalTimestampClock();
+  const currentTime = useCallback(() => clock.current!.now(), []);
+  const resumeClock = useCallback(() => clock.current!.resume(), []);
 
   const publish = useCallback((value: Snapshot) => {
     state.current = value;
     setSnapshot(value);
-    setNow(Date.now());
-  }, []);
+    setNow(currentTime());
+  }, [currentTime]);
 
   const prepareUnreadableBoardRecovery = useCallback((error: unknown) => {
     recoverySourceRaw.current = null;
@@ -138,10 +143,13 @@ export function useKitchenLocal() {
     }, 0);
 
     const tick = window.setInterval(() => {
-      if (!document.hidden) setNow(Date.now());
+      if (!document.hidden) setNow(currentTime());
     }, 100);
     const refreshOnResume = () => {
-      if (!document.hidden) void sync().catch(() => {});
+      if (!document.hidden) {
+        resumeClock();
+        void sync().catch(() => {});
+      }
     };
     const refreshOnStorage = (event: StorageEvent) => {
       if (event.key === LOCAL_BOARD_KEY) void sync().catch(() => {});
@@ -161,7 +169,7 @@ export function useKitchenLocal() {
       window.removeEventListener("pageshow", refreshOnResume);
       window.removeEventListener("storage", refreshOnStorage);
     };
-  }, [lockSupported, prepareUnreadableBoardRecovery, publish, sync]);
+  }, [currentTime, lockSupported, prepareUnreadableBoardRecovery, publish, resumeClock, sync]);
 
   useEffect(() => {
     if (!serviceWorkerSupported) return;
@@ -222,7 +230,7 @@ export function useKitchenLocal() {
     const operation = mutationQueue.current.then(() => {
       if (!activeEditor.current) throw new Error("操作を保存できません。アプリを開き直してください。");
       const current = readLocalBoard();
-      const now = Date.now();
+      const now = currentTime();
       const applied = applySnapshotCommand(current, command, now);
       const next: Snapshot = {
         revision: current.revision + 1,
@@ -271,7 +279,7 @@ export function useKitchenLocal() {
       pending.current.delete(pendingKey);
       if (alive.current) setPendingIds(new Set(pending.current));
     });
-  }, [legacyDoughResetRequired, prepareUnreadableBoardRecovery, publish]);
+  }, [currentTime, legacyDoughResetRequired, prepareUnreadableBoardRecovery, publish]);
 
   const restoreBackup = useCallback((backup: ParsedLocalBoardBackup, expectedRevision: number|null): Promise<Snapshot> => {
     if (legacyDoughResetRequired) throw new Error("旧24個タイマーの未完了セットがあるため、バックアップ復元は停止しています。全体リセットが必要です。");
@@ -319,7 +327,7 @@ export function useKitchenLocal() {
       const generation = generationBase + 1;
       if (!Number.isSafeInteger(revision) || !Number.isSafeInteger(generation)) throw new Error("盤面の更新番号が上限に達したため復元できません。");
 
-      const now = Date.now();
+      const now = currentTime();
       const next: Snapshot = {
         ...backup.snapshot,
         revision,
@@ -383,7 +391,7 @@ export function useKitchenLocal() {
         setPendingIds(new Set(pending.current));
       }
     });
-  }, [legacyDoughResetRequired, prepareUnreadableBoardRecovery, publish, recoveryAvailable]);
+  }, [currentTime, legacyDoughResetRequired, prepareUnreadableBoardRecovery, publish, recoveryAvailable]);
 
   const resetLegacyDoughData = useCallback((): Promise<Snapshot> => {
     if (!activeEditor.current || !legacyDoughResetRequired || !legacyDoughResetSourceRaw.current) {
@@ -464,7 +472,7 @@ export function useKitchenLocal() {
     restoreBackup,
     resetLegacyDoughData,
     sync,
-    currentTime: () => Date.now(),
+    currentTime,
     getSnapshot: () => state.current,
     statusMessage,
     cacheState,

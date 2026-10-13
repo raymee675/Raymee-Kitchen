@@ -62,7 +62,7 @@ export interface ExecutionRecord {
   unavailableAt: number | null;
   unavailableReason: string | null;
 }
-export interface CompletionItem { id: string; entityKey: string; creationOrdinal: number; version: number }
+export interface CompletionItem { id: string; entityKey: string; creationOrdinal: number; version: number; isRecalled?: boolean }
 export interface DoughBatchState {
   batchId: string;
   firstPancakeOrdinal: number;
@@ -92,6 +92,7 @@ export type Command =
   | { operationId: string; expectedGeneration?: number; type: "doughReset"; expectedDoughBatchId: string; expectedNextPancakeOrdinal: number }
   | { operationId: string; expectedGeneration?: number; type: "doughDiscardAndStart"; expectedDoughBatchId: string; expectedNextPancakeOrdinal: number }
   | { operationId: string; expectedGeneration?: number; type: "start" | "remove"; id: string; expectedVersion: number }
+  | { operationId: string; expectedGeneration?: number; type: "recall"; id: string; expectedVersion: number; expectedEntityKey: string }
   | { operationId: string; expectedGeneration:number; type:"delete"; id:string; expectedVersion:number }
   | { operationId: string; expectedGeneration?: number; type: "move"; id: string; expectedVersion: number; plate: 1 | 2; x: number; y: number }
   | { operationId: string; expectedGeneration?: number; type: "adjust"; id: string; expectedVersion: number; delta: -1 | 1 }
@@ -451,12 +452,13 @@ export function normalizeCompletionItems(value: unknown, records: readonly Execu
     const creationOrdinal = record?.creationOrdinal ?? creationOrdinalFor(candidate.id, candidate.creationOrdinal);
     if (!Number.isSafeInteger(candidate.version) || (candidate.version as number) < 1
       || entityKeys.has(entityKey) || !record || (candidate.creationOrdinal !== undefined && creationOrdinal !== candidate.creationOrdinal)
+      || (Object.prototype.hasOwnProperty.call(candidate, "isRecalled") && typeof candidate.isRecalled !== "boolean")
       || record.serveTimerStartedAt === null
       || record.servedAt !== null || record.unavailableAt !== null || record.unavailableReason !== null) {
       throw new Error("保存データの完成ボックス項目が正しくありません。");
     }
     entityKeys.add(entityKey);
-    return {id:candidate.id, entityKey, creationOrdinal, version:candidate.version as number};
+    return {id:candidate.id, entityKey, creationOrdinal, version:candidate.version as number, isRecalled:candidate.isRecalled === undefined ? true : candidate.isRecalled as boolean};
   });
 }
 
@@ -1184,6 +1186,10 @@ export function parseCommand(input: unknown): Command {
   const generation = c.expectedGeneration as number | undefined;
   const withGeneration = <T extends object>(command: T): T & {expectedGeneration?:number} =>
     generation === undefined ? command : {...command, expectedGeneration:generation};
+  if (c.type === "recall" && isDisplayPancakeId(c.id) && Number.isSafeInteger(c.expectedVersion) && (c.expectedVersion as number) > 0
+    && isEntityKey(c.expectedEntityKey)) {
+    return withGeneration({operationId:c.operationId, type:"recall", id:c.id, expectedVersion:c.expectedVersion as number, expectedEntityKey:c.expectedEntityKey});
+  }
   if (c.type === "delete" && isPancakeId(c.id) && Number.isSafeInteger(c.expectedVersion) && (c.expectedVersion as number) > 0
     && Number.isSafeInteger(c.expectedGeneration) && (c.expectedGeneration as number) >= INITIAL_BOARD_GENERATION) {
     return {operationId:c.operationId, expectedGeneration:c.expectedGeneration as number, type:"delete", id:c.id, expectedVersion:c.expectedVersion as number};
@@ -1362,7 +1368,6 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
       }
       const remainingItems = canonicalItems.filter(item => item.entityKey !== latest.entityKey);
       const remainingRecords = records.filter(record => record.entityKey !== latest.entityKey);
-      const remainingCompletionItems = completionItems.filter(item => item.entityKey !== latest.entityKey);
       const canReuseCreationOrdinal = target.creationOrdinal === board.nextCreationOrdinal - 1;
       const canReusePlacementOrdinal = (() => {
         if (board.nextPancakeOrdinal <= INITIAL_PANCAKE_ORDINAL) return false;
@@ -1520,6 +1525,26 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
     const created:Pancake = {id, archiveId, entityKey, creationOrdinal, plate:command.plate, x:position.x, y:position.y, griddlePlacedAt:now, movedToUpperAt:null, duration:TIMER_DURATION, temperature:DEFAULT_TEMPERATURE, startedAt:null, segments:[], version:1};
     return normalizeChangedBoard({...base, items:[...canonicalItems, created], records, completionItems, nextPancakeOrdinal:board.nextPancakeOrdinal + 1, nextCreationOrdinal:board.nextCreationOrdinal + 1, undoHistory:pushUndoEntry(undoHistory, entry), ...(doughTracked ? {doughBatch:nextDoughBatch} : {})});
   }
+  if (command.type === "recall") {
+    const completionItem = completionItems.find(item => item.id === command.id);
+    if (!completionItem) {
+      if (canonicalItems.some(item => item.id === command.id)) {
+        throw new KitchenError("not_completed", "このIDのお好み焼きはまだ完成品として回収されていません。");
+      }
+      throw new KitchenError("completion_not_found", "このIDの完成品は内部で保管されていません。現在の画面IDを確認してください。");
+    }
+    if (completionItem.entityKey !== command.expectedEntityKey || completionItem.version !== command.expectedVersion) {
+      throw new KitchenError("conflict", "完成品のIDまたは状態が更新されています。最新の表示でもう一度呼び出してください。");
+    }
+    if (completionItem.isRecalled !== false) return {...base, items:canonicalItems, records, completionItems};
+    if (completionItem.version >= Number.MAX_SAFE_INTEGER) throw new KitchenError("invalid_state", "完成品の更新回数が上限に達しました。");
+    return {
+      ...base,
+      items:canonicalItems,
+      records,
+      completionItems:completionItems.map(item => item.entityKey === completionItem.entityKey ? {...item, isRecalled:true, version:item.version + 1} : item),
+    };
+  }
   if (command.type === "remove") {
     const completionItem = completionItems.find(item => item.id === command.id);
     if (completionItem) {
@@ -1533,13 +1558,13 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
       const updated = serveAt < deadline
         ? {...record, servedAt:serveAt}
         : {...record, unavailableAt:deadline, unavailableReason:COMPLETION_EXPIRED_REASON};
-      return {
+      return normalizeChangedBoard({
         ...base,
         items:canonicalItems,
         records:records.map(item => item.entityKey === updated.entityKey ? updated : item),
         completionItems:completionItems.filter(item => item.entityKey !== completionItem.entityKey),
         undoHistory:[],
-      };
+      });
     }
   }
   const item = canonicalItems.find(i => i.id === command.id);
@@ -1554,7 +1579,7 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
       ...base,
       items:canonicalItems.filter(i => i.entityKey !== item.entityKey),
       records:completed ? [...records, completed] : records,
-      completionItems:completed?.serveTimerStartedAt !== null && completed ? [...completionItems, {id:item.id, entityKey:item.entityKey, creationOrdinal:item.creationOrdinal, version:1}] : completionItems,
+      completionItems:completed?.serveTimerStartedAt !== null && completed ? [...completionItems, {id:item.id, entityKey:item.entityKey, creationOrdinal:item.creationOrdinal, version:1, isRecalled:false}] : completionItems,
       undoHistory:[],
     });
   }
@@ -1673,6 +1698,7 @@ function collectDiscardRecord(item:Pancake, now:number):ExecutionRecord {
 export function applyCommand(items: Pancake[], command: Command, now: number): Pancake[] {
   if (command.type === "undo") throw new KitchenError("invalid_state", "操作の取り消しにはボード状態が必要です。");
   if (command.type === "reset") throw new KitchenError("invalid_state", "盤面の初期化にはボード状態が必要です。");
+  if (command.type === "recall") throw new KitchenError("invalid_state", "完成品の呼び出しにはボード状態が必要です。");
   if (command.type === "doughStart" || command.type === "doughReset" || command.type === "doughDiscardAndStart") {
     throw new KitchenError("invalid_state", "生地セットの操作にはボード状態が必要です。");
   }

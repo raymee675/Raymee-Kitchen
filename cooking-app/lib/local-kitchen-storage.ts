@@ -4,7 +4,7 @@ const siteSegment = typeof window === "undefined"
   ? "root"
   : encodeURIComponent(window.location.pathname.split("/").filter(Boolean)[0] ?? "root");
 export const LOCAL_BOARD_KEY = `teppan-timer:${siteSegment}:single-phone-board:v1`;
-export const LOCAL_BOARD_SCHEMA = 11;
+export const LOCAL_BOARD_SCHEMA = 12;
 export const LOCAL_BACKUP_FORMAT = "teppan-timer-pages-board";
 export const LOCAL_BACKUP_FORMAT_VERSION = 1;
 
@@ -80,6 +80,8 @@ function decode(raw: string | null): StoredBoard {
     || !Array.isArray(rawItems) || !rawItems.every(validItem)
     || (hasRecords && !Array.isArray(rawRecords))
     || (schemaVersion >= 3 && schemaVersion <= LOCAL_BOARD_SCHEMA && !Array.isArray(rawCompletionItems))
+    || (schemaVersion >= 12 && (!Array.isArray(rawCompletionItems)
+      || !rawCompletionItems.every(item => isRecord(item) && typeof item.isRecalled === "boolean")))
     || ((schemaVersion >= 7 && schemaVersion <= LOCAL_BOARD_SCHEMA)
       && (!Number.isSafeInteger(rawNextPancakeOrdinal) || (rawNextPancakeOrdinal as number) < 1 || (rawNextPancakeOrdinal as number) > 193))
     || (schemaVersion >= 4 && schemaVersion <= LOCAL_BOARD_SCHEMA && rawNextPancakeOrdinal !== undefined
@@ -106,8 +108,8 @@ function decode(raw: string | null): StoredBoard {
     doughBatch:schemaVersion >= 7 ? (value as Record<string, unknown>).doughBatch : null,
     doughBatchSize:legacyDoughSchema ? DOUGH_ID_BLOCK_SIZE : undefined,
     strictEntityMetadata:schemaVersion >= 8,
-    strictPublicIds:schemaVersion >= LOCAL_BOARD_SCHEMA,
-    strictArchiveIds:schemaVersion >= LOCAL_BOARD_SCHEMA,
+    strictPublicIds:schemaVersion >= 11,
+    strictArchiveIds:schemaVersion >= 11,
   });
   let doughBatch = board.doughBatch ?? null;
   if (legacyDoughSchema && doughBatch) {
