@@ -164,3 +164,9 @@ PC legacyのSQLiteに調理中データが残っている場合、Pages版はそ
 ## 関連する過去の検討
 
 複数スマホ共有を前提にした[GitHub Pages評価](github-pages-replacement-assessment.md)と、メール／登録コード送信案[接続案内の設計](connection-delivery-architecture.md)は、今回の単一スマホ・認証不要という前提には適用しない。
+
+## 2026-10-14 長押し移動の公開記録
+
+- commit `5138634` をmainへpush。[Actions run 38498311253](https://github.com/raymee675/Raymee-Kitchen/actions/runs/38498311253) の型確認・ビルド・Pages公開が成功。
+- 個別の楕円削除を廃止し、450ms長押し後に両鉄板の空きマスへ移動する機能を公開した。公開ブラウザーを新しい版へ更新して案内表示と既存盤面保持を確認。
+- 型・ビルド・モデル/保存実行検証と短いタップ等のブラウザー確認を実施。長押し→ドラッグ→ドロップの固定スマートフォン実機操作は未確認。詳細は[実装計画と記録](pancake-longpress-move-plan.md)を参照。
