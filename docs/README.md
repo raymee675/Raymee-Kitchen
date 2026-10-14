@@ -20,6 +20,7 @@
 
 以下は個別機能の設計・実装状況を扱います。各ファイルにある状態表示はその資料の記録であり、アプリ全体の現行運用状況を表しません。
 
+- [お好み焼き削除廃止・長押し移動計画](pancake-longpress-move-plan.md)
 - [完成ボックス計画](completed-box-plan.md)
 - [提供タイマーのID呼び出し計画](serve-timer-recall-plan.md)
 - [実行記録の書き出し計画](execution-record-export-plan.md)

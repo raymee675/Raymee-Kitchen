@@ -76,7 +76,7 @@ type OverflowRestorePosition = { id:string; entityKey:string; creationOrdinal:nu
 type OverflowPlateRestore = { positions:Array<OverflowRestorePosition>; legacyPlate?:1|2 };
 export type UndoEntry =
   | { operationId: string; type: "create"; id: string; entityKey:string; creationOrdinal:number }
-  | { operationId: string; type: "move"; id: string; entityKey:string; creationOrdinal:number; from: Pick<Pancake, "plate" | "x" | "y">; overflowPlateRestore?: OverflowPlateRestore }
+  | { operationId: string; type: "move"; id: string; entityKey:string; creationOrdinal:number; from: Pick<Pancake, "plate" | "x" | "y">; previousMovedToUpperAt?:number|null; overflowPlateRestore?: OverflowPlateRestore }
   | { operationId: string; type: "delete"; id: string; entityKey:string; creationOrdinal:number; pancake: Pancake; discardRecordEntityKey:string|null };
 export const MAX_UNDO_HISTORY = 50;
 // doughBatch is present in the Pages local snapshot. It remains optional for
@@ -93,7 +93,7 @@ export type Command =
   | { operationId: string; expectedGeneration?: number; type: "doughDiscardAndStart"; expectedDoughBatchId: string; expectedNextPancakeOrdinal: number }
   | { operationId: string; expectedGeneration?: number; type: "start" | "remove"; id: string; expectedVersion: number }
   | { operationId: string; expectedGeneration?: number; type: "recall"; id: string; expectedVersion: number; expectedEntityKey: string }
-  | { operationId: string; expectedGeneration:number; type:"delete"; id:string; expectedVersion:number }
+  | { operationId: string; expectedGeneration:number; type:"reposition"; id:string; expectedVersion:number; expectedEntityKey:string; plate:1|2; x:number; y:number }
   | { operationId: string; expectedGeneration?: number; type: "move"; id: string; expectedVersion: number; plate: 1 | 2; x: number; y: number }
   | { operationId: string; expectedGeneration?: number; type: "adjust"; id: string; expectedVersion: number; delta: -1 | 1 }
   | { operationId: string; expectedGeneration?: number; type: "undo"; expectedUndoOperationId: string }
@@ -861,6 +861,13 @@ export function gridMoveBlockReason(items: readonly Pancake[], id: string, plate
   return gridDropBlockReason(items, plate, cellIndex, id);
 }
 
+export function gridRepositionBlockReason(items: readonly Pancake[], id:string, plate:1|2, cellIndex:number): "missing"|"occupied"|"over_capacity"|null {
+  const item = items.find(candidate => candidate.id === id);
+  if (!item) return "missing";
+  if (isPlateOverCapacity(items, item.plate) || isPlateOverCapacity(items, plate)) return "over_capacity";
+  return gridDropBlockReason(items, plate, cellIndex, id);
+}
+
 function nearestFreeCell(x: number, y: number, occupied: Set<number>): GridCell {
   let nearest: GridCell | undefined;
   let distance = Number.POSITIVE_INFINITY;
@@ -910,6 +917,11 @@ function normalizeUndoHistory(value: unknown, records: readonly ExecutionRecord[
       const position = from as Record<string, unknown>;
       if ((position.plate !== 1 && position.plate !== 2) || !savedPositionIsValid(position.x, position.y)) {
         throw new Error("保存データの移動取り消し履歴が正しくありません。");
+      }
+      const hasPreviousMovedToUpperAt = Object.prototype.hasOwnProperty.call(entry, "previousMovedToUpperAt");
+      if (hasPreviousMovedToUpperAt && entry.previousMovedToUpperAt !== null
+        && (typeof entry.previousMovedToUpperAt !== "number" || !Number.isFinite(entry.previousMovedToUpperAt) || entry.previousMovedToUpperAt < 0)) {
+        throw new Error("保存データの移動前時刻が正しくありません。");
       }
       let overflowPlateRestore: OverflowPlateRestore | undefined;
       if (entry.overflowPlateRestore !== undefined) {
@@ -972,6 +984,7 @@ function normalizeUndoHistory(value: unknown, records: readonly ExecutionRecord[
         entityKey,
         creationOrdinal,
         from:{plate:position.plate, x:cell?.x ?? position.x as number, y:cell?.y ?? position.y as number},
+        ...(hasPreviousMovedToUpperAt ? {previousMovedToUpperAt:entry.previousMovedToUpperAt as number|null} : {}),
         ...(overflowPlateRestore ? {overflowPlateRestore} : {}),
       };
     }
@@ -1190,9 +1203,10 @@ export function parseCommand(input: unknown): Command {
     && isEntityKey(c.expectedEntityKey)) {
     return withGeneration({operationId:c.operationId, type:"recall", id:c.id, expectedVersion:c.expectedVersion as number, expectedEntityKey:c.expectedEntityKey});
   }
-  if (c.type === "delete" && isPancakeId(c.id) && Number.isSafeInteger(c.expectedVersion) && (c.expectedVersion as number) > 0
-    && Number.isSafeInteger(c.expectedGeneration) && (c.expectedGeneration as number) >= INITIAL_BOARD_GENERATION) {
-    return {operationId:c.operationId, expectedGeneration:c.expectedGeneration as number, type:"delete", id:c.id, expectedVersion:c.expectedVersion as number};
+  if (c.type === "reposition" && isDisplayPancakeId(c.id) && Number.isSafeInteger(c.expectedVersion) && (c.expectedVersion as number) > 0
+    && isEntityKey(c.expectedEntityKey) && Number.isSafeInteger(c.expectedGeneration) && (c.expectedGeneration as number) >= INITIAL_BOARD_GENERATION
+    && (c.plate === 1 || c.plate === 2) && typeof c.x === "number" && typeof c.y === "number" && Number.isFinite(c.x) && Number.isFinite(c.y) && c.x >= 0 && c.x <= 1 && c.y >= 0 && c.y <= 1) {
+    return {operationId:c.operationId, expectedGeneration:c.expectedGeneration as number, type:"reposition", id:c.id, expectedVersion:c.expectedVersion as number, expectedEntityKey:c.expectedEntityKey, plate:c.plate, x:c.x, y:c.y};
   }
   if (c.type === "reset") return withGeneration({operationId:c.operationId, type:"reset"});
   const validNextOrdinal = Number.isSafeInteger(c.expectedNextPancakeOrdinal)
@@ -1237,6 +1251,8 @@ export function parseCommand(input: unknown): Command {
   throw new KitchenError("invalid", "操作内容が正しくありません。", 400);
 }
 export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: number): Snapshot {
+  if ((command as {type:string}).type === "delete") throw new KitchenError("invalid", "お好み焼きの削除操作は廃止されています。", 400);
+  if (command.type === "reposition") command = parseCommand(command);
   const doughTracked = Object.prototype.hasOwnProperty.call(snapshot, "doughBatch");
   const board = normalizeBoardData({
     items:snapshot.items,
@@ -1319,31 +1335,6 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
       nextPancakeOrdinal:firstPancakeOrdinal,
       doughBatch:nextBatch,
       undoHistory:[],
-      serverNow:now,
-    });
-  }
-  if (command.type === "delete") {
-    if (!doughTracked) throw new KitchenError("unsupported", "盤外削除はPages版の保存画面でのみ使えます。");
-    const item = canonicalItems.find(candidate => candidate.id === command.id);
-    if (!item) throw new KitchenError("removed", "このお好み焼きは取り出されています。");
-    if (item.version !== command.expectedVersion) throw new KitchenError("conflict", "別の端末で変更されました。最新の表示でもう一度操作してください。");
-    if (board.generation >= Number.MAX_SAFE_INTEGER) throw new KitchenError("invalid_state", "盤面世代が上限に達したため、削除できません。");
-    const discarded = item.startedAt === null ? null : collectDiscardRecord(item, now);
-    const undoEntry:UndoEntry = {
-      operationId:command.operationId,
-      type:"delete",
-      id:item.id,
-      entityKey:item.entityKey,
-      creationOrdinal:item.creationOrdinal,
-      pancake:item,
-      discardRecordEntityKey:discarded?.entityKey ?? null,
-    };
-    return normalizeChangedBoard({
-      ...base,
-      generation:board.generation + 1,
-      items:canonicalItems.filter(candidate => candidate.entityKey !== item.entityKey),
-      records:discarded ? [...records, discarded] : records,
-      undoHistory:pushUndoEntry(undoHistory, undoEntry),
       serverNow:now,
     });
   }
@@ -1431,7 +1422,7 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
             plate:position.plate,
             x:position.x,
             y:position.y,
-            ...(candidate.entityKey === latest.entityKey ? {movedToUpperAt:null} : {}),
+            ...(candidate.entityKey === latest.entityKey ? {movedToUpperAt:latest.previousMovedToUpperAt ?? null} : {}),
             version:candidate.version + 1,
           };
         });
@@ -1442,11 +1433,14 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
       const targetOccupied = targetCell
         ? isGridCellOccupied(canonicalItems, latest.from.plate, targetCell.index, item?.id)
         : canonicalItems.some(candidate => candidate.id !== item?.id && candidate.plate === latest.from.plate && overlapsLegacy(candidate, latest.from));
-      if (!item || targetOccupied) {
+      const restoredItemsCapacity = item ? canonicalItems.map(candidate => candidate.entityKey === item.entityKey ? {...candidate, plate:latest.from.plate} : candidate) : canonicalItems;
+      const exceedsCapacity = latest.previousMovedToUpperAt !== undefined && item
+        && (isPlateOverCapacity(restoredItemsCapacity, item.plate) || isPlateOverCapacity(restoredItemsCapacity, latest.from.plate));
+      if (!item || targetOccupied || exceedsCapacity) {
         throw new KitchenError("undo_conflict", "移動前のマスに戻せません。最新の状態を確認してください。");
       }
       if (item.version >= Number.MAX_SAFE_INTEGER) throw new KitchenError("invalid_state", "楕円の更新回数が上限に達しました。");
-      const restored = {...item, ...latest.from, ...(targetCell ? {x:targetCell.x, y:targetCell.y} : {}), movedToUpperAt:null, version:item.version + 1};
+      const restored = {...item, ...latest.from, ...(targetCell ? {x:targetCell.x, y:targetCell.y} : {}), movedToUpperAt:latest.previousMovedToUpperAt ?? null, version:item.version + 1};
       return normalizeChangedBoard({...base, items:canonicalItems.map(candidate => candidate.id === item.id ? restored : candidate), undoHistory:remainingHistory});
     }
     if (canonicalItems.some(item => item.entityKey === latest.entityKey) || completionItems.some(item => item.entityKey === latest.entityKey)) {
@@ -1571,6 +1565,7 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
   if (!item) throw new KitchenError("removed", "このお好み焼きは取り出されています。");
   if (command.type === "start" && item.startedAt !== null) return {...base, items:canonicalItems, records, completionItems};
   if (item.version !== command.expectedVersion) throw new KitchenError("conflict", "別の端末で変更されました。最新の表示でもう一度操作してください。");
+  if (command.type === "reposition" && item.entityKey !== command.expectedEntityKey) throw new KitchenError("conflict", "移動対象のIDが更新されています。最新の表示でもう一度操作してください。");
   const current = timer(item, now);
   if (command.type === "remove") {
     if (command.type === "remove" && current.state !== "done") throw new KitchenError("not_finished", "焼き上がった赤いお好み焼きをタップしてください。");
@@ -1585,6 +1580,18 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
   }
   let next: Pancake;
   if (command.type === "start") next = {...item, startedAt:now, segments:[{temperature:item.temperature, startedAt:now, endedAt:null}], version:item.version + 1};
+  else if (command.type === "reposition") {
+    const position = nearestGridCell(command.x, command.y);
+    const source = nearestGridCell(item.x, item.y);
+    const blockReason = gridRepositionBlockReason(canonicalItems, item.id, command.plate, position.index);
+    if (blockReason === "missing") throw new KitchenError("removed", "このお好み焼きは取り出されています。");
+    if (blockReason === "over_capacity") throw new KitchenError("grid_over_capacity", "移動元または移動先の鉄板が過密状態のため移動できません。");
+    if (blockReason === "occupied") throw new KitchenError("cell_occupied", "移動先のマスは使用中のため移動できません。");
+    if (item.plate === command.plate && source.index === position.index) return {...base, items:canonicalItems, records, completionItems};
+    if (item.version >= Number.MAX_SAFE_INTEGER) throw new KitchenError("invalid_state", "楕円の更新回数が上限に達しました。");
+    const movedToUpperAt = source.row === GRID_ROWS - 1 && position.row === 0 ? now : item.movedToUpperAt;
+    next = {...item, plate:command.plate, x:position.x, y:position.y, movedToUpperAt, version:item.version + 1};
+  }
   else if (command.type === "move") {
     const position = nearestGridCell(command.x, command.y);
     const blockReason = gridMoveBlockReason(canonicalItems, item.id, command.plate, position.index);
@@ -1610,7 +1617,7 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
       : rotateOpenSegment(item.segments, temperature, now);
     next = {...item, temperature, segments, version:item.version + 1};
   } else throw new KitchenError("invalid", "操作内容が正しくありません。", 400);
-  const moveUndoEntry: UndoEntry | null = command.type === "move"
+  const moveUndoEntry: UndoEntry | null = command.type === "move" || command.type === "reposition"
     ? (() => {
       const preserveOverflowPositions = isGridOverCapacity(canonicalItems);
       return {
@@ -1620,6 +1627,7 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
         entityKey:item.entityKey,
         creationOrdinal:item.creationOrdinal,
         from:{plate:item.plate, x:item.x, y:item.y},
+        previousMovedToUpperAt:item.movedToUpperAt,
         ...(preserveOverflowPositions
           ? {overflowPlateRestore:{
             positions:canonicalItems.map(candidate => ({id:candidate.id, entityKey:candidate.entityKey, creationOrdinal:candidate.creationOrdinal, plate:candidate.plate, x:candidate.x, y:candidate.y})),
@@ -1679,17 +1687,6 @@ function collectRecord(item: Pancake, now: number): ExecutionRecord {
     servedAt:null,
     unavailableAt:null,
     unavailableReason:null,
-  };
-}
-
-function collectDiscardRecord(item:Pancake, now:number):ExecutionRecord {
-  const completed = collectRecord(item, now);
-  return {
-    ...completed,
-    serveTimerStartedAt:null,
-    serveDeadlineAt:null,
-    unavailableAt:completed.collectedAt,
-    unavailableReason:PLATE_DISCARD_REASON,
   };
 }
 

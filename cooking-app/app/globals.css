@@ -102,12 +102,13 @@
 .backup-preview>div{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;margin-top:12px}
 .backup-restore-button{min-height:44px;padding:8px 12px;border:1px solid #b93825;border-radius:8px;background:#b93825;color:#fff;font:inherit;font-size:13px;font-weight:700}
 .backup-restore-button:disabled{opacity:.55;cursor:wait}
-.pages-kitchen .oval.long-press-armed>ellipse{stroke:#f3a22f;stroke-width:10;filter:drop-shadow(0 0 9px #f3a22f99)}
-.pages-kitchen .oval.delete-dragging>ellipse{stroke:#c5261a;stroke-width:12;filter:drop-shadow(0 0 12px #c5261aaa)}
-.delete-drag-cue{position:fixed;top:calc(8px + env(safe-area-inset-top));left:50%;z-index:30;display:grid;gap:3px;width:max-content;max-width:calc(100vw - 24px);padding:10px 14px;transform:translateX(-50%);border:1px solid #d79a37;border-radius:10px;background:#fff8e9;color:#49330d;text-align:center;box-shadow:0 4px 18px #2226;pointer-events:none}
-.delete-drag-cue strong{font-size:14px;line-height:1.35}
-.delete-drag-cue span{font-size:12px;line-height:1.35}
-.delete-drag-cue.outside{border-color:#b93024;background:#fff0ed;color:#7f1d16}
+.oval.long-press-armed>ellipse{stroke:#f3a22f;stroke-width:10;filter:drop-shadow(0 0 9px #f3a22f99)}
+.oval.move-dragging>ellipse{stroke:#e9a22e;stroke-width:12;filter:drop-shadow(0 0 12px #e9a22eaa)}
+.move-target{fill:#4caf5033;stroke:#65ce7a;stroke-width:10}.move-target.blocked{fill:#de493e33;stroke:#ef7b72}
+.move-drag-cue{position:fixed;top:calc(8px + env(safe-area-inset-top));left:50%;z-index:30;display:grid;gap:3px;width:max-content;max-width:calc(100vw - 24px);padding:10px 14px;transform:translateX(-50%);border:1px solid #d79a37;border-radius:10px;background:#fff8e9;color:#49330d;text-align:center;box-shadow:0 4px 18px #2226;pointer-events:none}
+.move-drag-cue strong{font-size:14px;line-height:1.35}
+.move-drag-cue span{font-size:12px;line-height:1.35}
+.move-drag-cue.blocked{border-color:#b93024;background:#fff0ed;color:#7f1d16}
 @media(max-width:600px){
  .pages-storage-note{margin:7px 0 0;padding:7px 9px;font-size:11px}
  .pages-kitchen .dough-timer-card{margin:9px 0 13px;padding:11px 12px}
