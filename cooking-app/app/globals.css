@@ -159,3 +159,60 @@
 .delivery-search-result.is-served>strong,.delivery-search-result.is-available>strong{background:#e7f3ec;color:#23643d}
 .delivery-search-result.is-unavailable>strong{background:#dceefa;color:#164c70}
 @media(max-width:400px){.delivery-search-controls{grid-template-columns:minmax(0,1fr) 68px;gap:6px}.delivery-search button{min-width:68px;padding-inline:8px}}
+
+/* Operational controls contain values and actions; instructions belong in the manual. */
+.workspace-controls{display:grid;grid-template-columns:198px 116px minmax(0,1fr);gap:8px;align-items:stretch;margin-bottom:8px}
+.control-left{display:flex;flex-direction:column;gap:6px;min-width:0}
+.control-left .topbar{height:30px;min-height:0;padding:0;border:0;gap:3px;flex-wrap:nowrap}
+.control-left .top-actions{display:flex;flex:1;min-width:0;width:auto;gap:3px;flex-wrap:nowrap;justify-content:flex-end}
+.control-left .topbar button{width:29px;min-width:29px;height:29px;min-height:29px;padding:4px;border-radius:6px;gap:0}
+.control-left .topbar button span{display:none}
+.control-left .topbar .undo-button{background:#d94f16;color:white}
+.control-left .reset-confirmation{position:fixed;z-index:40;inset:16px 16px auto;max-width:520px;margin:auto}
+.control-left .reset-confirmation button{width:auto;height:auto;min-width:72px}
+.control-left .reset-confirmation>span{display:block}
+.kitchen .dough-timer-card{display:flex;align-items:center;justify-content:center;gap:12px;width:100%;min-height:42px;margin:0;padding:6px;border:1px solid #d7c1a1;border-radius:8px;background:#fff8ed;color:#40331e;font:inherit;font-weight:700}
+.kitchen .dough-timer-card:disabled{opacity:1;cursor:default}
+.kitchen .dough-timer-card.dough-expired{border-color:#c33;background:#fff0ed;color:#a3261e}
+.kitchen .dough-clock{font-size:23px;line-height:1;font-variant-numeric:tabular-nums}
+.kitchen .dough-count{padding:0;background:none;color:inherit;font-size:18px}
+.workspace-controls .timer-recall{display:flex;justify-content:center;align-items:center;margin:0;padding:0;background:transparent;border:0}
+.workspace-controls .timer-recall-icon{width:116px;height:78px;margin:0}
+.workspace-controls .timer-recall-center{inset:0 29px;gap:2px;border-width:1px}
+.workspace-controls .timer-recall-center strong{font-size:18px}
+.workspace-controls .timer-recall-center small,.workspace-controls .timer-recall-center>span{font-size:12px}
+.workspace-controls .timer-recall-arrows button{width:28px;height:36px;border-radius:6px}
+.workspace-controls .timer-recall-m{top:0}.workspace-controls .timer-recall-n{bottom:0}
+.workspace-controls .timer-recall-arrows>span{display:none}
+.workspace-controls .completion-box{min-width:0;margin:0;padding:6px;border-radius:8px;box-shadow:none}
+.workspace-controls .delivery-search-results{height:100%;margin:0;padding:0;background:none;align-content:center}
+.workspace-controls .delivery-search-result{display:flex;flex-wrap:wrap;justify-content:center;gap:5px 10px;padding:6px;border:0}
+.workspace-controls .delivery-search-result>span{font-size:18px;font-weight:700}
+.workspace-controls .delivery-search-result>strong{padding:3px 6px;font-size:12px}
+.delivery-remaining,.delivery-search-result time{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
+.serve-button{min-height:32px;padding:4px 12px;border:0;border-radius:6px;background:#287b48;color:white;font:inherit;font-size:14px;font-weight:700}
+.serve-button:disabled{opacity:.5}
+.kitchen{max-width:none;padding:8px max(8px,env(safe-area-inset-right)) 8px max(8px,env(safe-area-inset-left))}
+.kitchen .plates{gap:10px;flex-wrap:nowrap;align-items:stretch}
+.kitchen .plate-card{display:flex;flex-direction:column;width:calc((100% - 10px)/2);min-width:0}
+.kitchen .plate-heading{margin:0 0 4px;font-size:11px}
+.kitchen .plate-heading h2{font-size:12px}
+.kitchen .plate-heading h2>span{display:none}
+.kitchen .plate{width:100%;border-width:3px;box-shadow:none}
+.kitchen .plate-label-overlay{width:100%;height:100%;aspect-ratio:auto}
+.kitchen .plate-label .oval-temperature{font-size:13px}
+.kitchen .plate-label .oval-id{font-size:12px}
+@media(orientation:landscape){
+ html:has(.kitchen),body:has(.kitchen){height:100%;overflow:hidden;overscroll-behavior:none}
+ .kitchen{display:flex;flex-direction:column;height:100dvh;min-height:0;overflow:hidden}
+ .workspace-controls{flex:0 0 auto}
+ .kitchen .plates{flex:1;min-height:0}
+ .kitchen .plate{flex:1;min-height:0;aspect-ratio:auto}
+ .kitchen>.status-banner,.kitchen>.error-panel,.kitchen>.grid-capacity-warning{flex-shrink:0;max-height:30vh;overflow:auto;margin-bottom:4px}
+}
+@media(orientation:portrait){
+ .workspace-controls{grid-template-columns:minmax(0,1fr) 116px}
+ .workspace-controls .completion-box{grid-column:1/-1;min-height:62px}
+ .kitchen .plates{flex-direction:column}
+ .kitchen .plate-card{width:100%}
+}
