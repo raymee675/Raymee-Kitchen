@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { toast } from "sonner";
+import { showKitchenError } from "./kitchen-notification";
 import { clockSample, type Command, type Snapshot } from "./kitchen-model";
 
 export function useKitchen() {
@@ -102,7 +102,7 @@ export function useKitchen() {
         return data as Snapshot;
       }
       throw new Error("操作結果を確認できませんでした。");
-    } catch(error) { toast.error(error instanceof Error ? error.message : "操作を保存できませんでした。"); throw error; }
+    } catch(error) { showKitchenError(error instanceof Error ? error.message : "操作を保存できませんでした。"); throw error; }
     finally { pending.current.delete(pendingKey); if(alive.current) setPendingIds(new Set(pending.current)); }
   }, [accept,sync]);
   return {snapshot, now, connection, pendingIds, send, sync, currentTime, getSnapshot:() => state.current};

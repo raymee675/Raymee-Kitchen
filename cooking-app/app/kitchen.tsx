@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type PointerEvent, type KeyboardEvent, typ
 import { CircleHelp, ArrowLeft, ArrowRight, Download, Undo2, RotateCcw, Database, RefreshCw } from "lucide-react";
 import { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Toaster } from "@/components/ui/sonner";
-import { toast } from "sonner";
+import { showKitchenError } from "@/lib/kitchen-notification";
 import { useKitchen } from "@/lib/use-kitchen";
 import { useKitchenLocal } from "@/lib/use-kitchen-local";
 import { DOUGH_ID_BLOCK_SIZE, DOUGH_TIMER_BATCH_SIZE, GRID_CELLS, GRID_COLUMNS, GRID_ROWS, MAX_PANCAKE_IDS, OVAL_RX, OVAL_RY, completionStatus, doughBatchStatus, gridCellAt, gridMoveBlockReason, gridRepositionBlockReason, isGridCellActuallyOccupied, isGridCellOccupied, isGridOverCapacity, nearestGridCell, nextDoughBatchFirstOrdinal, timer, parseCommand, type GridMoveBlockReason, type Pancake, type Command, type ExecutionRecord, type Snapshot } from "@/lib/kitchen-model";
@@ -208,7 +208,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  const run = (command:Command) => {
    let operation:Promise<Snapshot>;
    try { operation=send(command); }
-   catch(error) { toast.error(error instanceof Error?error.message:"操作を保存できませんでした。"); return; }
+   catch(error) { showKitchenError(error instanceof Error?error.message:"操作を保存できませんでした。"); return; }
    void operation.catch(()=>{}); };
  function serveCompletion(entityKey:string) {
    const controller=actions.current;
@@ -223,7 +223,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
        .catch(()=>{}).finally(()=>servingEntityKeys.current.delete(entityKey));
    } catch(error) {
      servingEntityKeys.current.delete(entityKey);
-     toast.error(error instanceof Error?error.message:"提供を保存できませんでした。");
+     showKitchenError(error instanceof Error?error.message:"提供を保存できませんでした。");
    }
  }
  function exportRecords() {
@@ -242,7 +242,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
       link.click();
       window.setTimeout(()=>URL.revokeObjectURL(url),1000);
     } catch (error) {
-      toast.error(error instanceof Error?error.message:"バックアップを書き出せませんでした。");
+      showKitchenError(error instanceof Error?error.message:"バックアップを書き出せませんでした。");
     }
   }
   function selectBackupFile(event:ChangeEvent<HTMLInputElement>) {
@@ -251,12 +251,12 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
     input.value="";
     if(!file)return;
     setBackupDraft(null);
-    if(file.size>10*1024*1024){toast.error("バックアップファイルは10MB以下を選んでください。現在の盤面は変更していません。");return;}
+    if(file.size>10*1024*1024){showKitchenError("バックアップファイルは10MB以下を選んでください。現在の盤面は変更していません。");return;}
     setBackupReading(true);
     void file.text().then(parseLocalBoardBackup).then(backup=>{
       setBackupDraft(backup);
     }).catch(error=>{
-      toast.error(error instanceof Error?error.message:"バックアップを読み込めませんでした。現在の盤面は変更していません。");
+      showKitchenError(error instanceof Error?error.message:"バックアップを読み込めませんでした。現在の盤面は変更していません。");
     }).finally(()=>setBackupReading(false));
   }
   function restoreBoardBackup() {
@@ -279,7 +279,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    resetSubmitting.current=true;
    let operation:Promise<Snapshot>;
    try { operation=kitchen.resetLegacyDoughData(); }
-   catch(error) { resetSubmitting.current=false; toast.error(error instanceof Error?error.message:"全体リセットを開始できませんでした。"); return; }
+   catch(error) { resetSubmitting.current=false; showKitchenError(error instanceof Error?error.message:"全体リセットを開始できませんでした。"); return; }
    void operation.then(()=>{
      setLegacyDoughResetConfirmation(false);
    }).catch(()=>{}).finally(()=>{resetSubmitting.current=false;});
@@ -299,10 +299,10 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      const source=nearestGridCell(item.x,item.y);
      if(source.row===GRID_ROWS-1) {
        const target=GRID_CELLS[source.index-GRID_COLUMNS];
-       if(!target) { toast.error("真上の移動先を確認できませんでした。"); return; }
+       if(!target) { showKitchenError("真上の移動先を確認できませんでした。"); return; }
        if(isGridCellActuallyOccupied(items,item.plate,target.index,item.id)) { run({...base,type:"start"}); return; }
        const reason=gridMoveBlockReason(items,item.id,item.plate,target.index);
-       if(reason) { toast.error(gridMoveBlockMessage(reason)); return; }
+       if(reason) { showKitchenError(gridMoveBlockMessage(reason)); return; }
        run({...base,type:"move",plate:item.plate,x:target.x,y:target.y});
        return;
      }
@@ -310,11 +310,11 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    }
    else if (action==="tap" && current.state==="running") {
      const source=nearestGridCell(item.x,item.y);
-     if(source.row!==GRID_ROWS-1) { toast.error("短いタップでは上段から移動しません。長押しして空きマスへドラッグしてください。"); return; }
+     if(source.row!==GRID_ROWS-1) { showKitchenError("短いタップでは上段から移動しません。長押しして空きマスへドラッグしてください。"); return; }
      const target=GRID_CELLS[source.index-GRID_COLUMNS];
-     if(!target) { toast.error("真上の移動先を確認できませんでした。"); return; }
+     if(!target) { showKitchenError("真上の移動先を確認できませんでした。"); return; }
      const reason=gridMoveBlockReason(items,item.id,item.plate,target.index);
-     if(reason) { toast.error(gridMoveBlockMessage(reason)); return; }
+     if(reason) { showKitchenError(gridMoveBlockMessage(reason)); return; }
      run({...base,type:"move",plate:item.plate,x:target.x,y:target.y});
    }
    else if ((action==="left"||action==="right") && current.state!=="done") run({...base,type:"adjust",delta:action==="right"?1:-1});
@@ -432,7 +432,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    }
    if(isLongPressGesture&&c.longPressArmed&&c.dragging&&dropTarget&&c.itemId&&c.itemEntityKey&&c.itemVersion!==null) {
      if(dropTarget.reason){
-       toast.error(dropTarget.reason==="occupied"?"このマスは使用中です。元の位置に戻しました。":dropTarget.reason==="over_capacity"?"6マスを超える配置を保持しているため移動できません。":"移動するお好み焼きを確認できません。");
+       showKitchenError(dropTarget.reason==="occupied"?"このマスは使用中です。元の位置に戻しました。":dropTarget.reason==="over_capacity"?"6マスを超える配置を保持しているため移動できません。":"移動するお好み焼きを確認できません。");
        return;
      }
      const destination=GRID_CELLS[dropTarget.cellIndex];
@@ -447,11 +447,11 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    if(c.item) perform(c.item,c.action??"tap",c.expectedGeneration);
    else {
      const cell=gridCellAt(c.targetX,c.targetY);
-     if(cell.row!==GRID_ROWS-1) { toast.error("上段は移動専用です。下段に配置するか、下段から同じ列の上段へ移動してください。"); return; }
-     if(gridBlocked) { toast.error("各鉄板が6枚以下になるまで配置できません。"); return; }
-     if(isGridCellOccupied(items,c.plate,cell.index)) { toast.error("このマスにはすでに楕円があります。空いているマスをタップしてください。"); return; }
+     if(cell.row!==GRID_ROWS-1) { showKitchenError("上段は移動専用です。下段に配置するか、下段から同じ列の上段へ移動してください。"); return; }
+     if(gridBlocked) { showKitchenError("各鉄板が6枚以下になるまで配置できません。"); return; }
+     if(isGridCellOccupied(items,c.plate,cell.index)) { showKitchenError("このマスにはすでに楕円があります。空いているマスをタップしてください。"); return; }
      if(__PAGES_MODE__&&doughStatus!=="active") {
-       toast.error(doughStatus==="not_started"?"配置前に生地欄をタップしてください。":doughStatus==="expired"?"生地期限切れ。生地欄をタップして廃棄・再開してください。":"生地欄をタップして次の6個を開始してください。");
+       showKitchenError(doughStatus==="not_started"?"配置前に生地欄をタップしてください。":doughStatus==="expired"?"生地期限切れ。生地欄をタップして廃棄・再開してください。":"生地欄をタップして次の6個を開始してください。");
        return;
      }
      run({operationId:createUuid(),expectedGeneration:c.expectedGeneration,type:"create",plate:c.plate,x:cell.x,y:cell.y,...(__PAGES_MODE__?{expectedDoughBatchId:c.expectedDoughBatchId,expectedNextPancakeOrdinal:c.expectedNextPancakeOrdinal}:{})});
@@ -474,7 +474,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
   const doughRemainingLabel=`${String(Math.floor(doughRemainingSeconds/60)).padStart(2,"0")}:${String(doughRemainingSeconds%60).padStart(2,"0")}`;
   const doughPlacedCount=doughBatch?.placedEntityKeys.length??0;
   return <main className={`kitchen${__PAGES_MODE__?" pages-kitchen":""}`}>
- <Toaster position="top-center" richColors theme="light"/>
+ <Toaster className="kitchen-notifications" position="bottom-right" theme="light" visibleToasts={1} duration={2500} offset={8} mobileOffset={8} toastOptions={{closeButton:false}}/>
  <div className="workspace-controls">
  <div className="control-left">
  <header className="topbar">
@@ -538,9 +538,9 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
          <button type="button" aria-label="IDのmを1増やす" disabled={!snapshot||recallM===MAX_PANCAKE_IDS/DOUGH_ID_BLOCK_SIZE} onClick={()=>setRecallM(value=>Math.min(MAX_PANCAKE_IDS/DOUGH_ID_BLOCK_SIZE,value+1))}><ArrowRight size={18}/></button>
        </div>
        <div className="timer-recall-arrows timer-recall-n">
-         <button type="button" aria-label="IDのnを1減らす" disabled={!snapshot||recallN===1} onClick={()=>setRecallN(value=>Math.max(1,value-1))}><ArrowLeft size={18}/></button>
+         <button type="button" aria-label="IDのnを1減らす" disabled={!snapshot} onClick={()=>setRecallN(value=>value===1?DOUGH_ID_BLOCK_SIZE:value-1)}><ArrowLeft size={18}/></button>
          <span>{recallN}</span>
-         <button type="button" aria-label="IDのnを1増やす" disabled={!snapshot||recallN===DOUGH_ID_BLOCK_SIZE} onClick={()=>setRecallN(value=>Math.min(DOUGH_ID_BLOCK_SIZE,value+1))}><ArrowRight size={18}/></button>
+         <button type="button" aria-label="IDのnを1増やす" disabled={!snapshot} onClick={()=>setRecallN(value=>value===DOUGH_ID_BLOCK_SIZE?1:value+1)}><ArrowRight size={18}/></button>
        </div>
      </div>
 

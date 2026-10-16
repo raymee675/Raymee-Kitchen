@@ -194,6 +194,10 @@
 .serve-button:disabled{opacity:.5}
 .dismiss-delivery-button{display:grid;place-items:center;flex-shrink:0;width:28px;height:28px;padding:0;border:1px solid #cbd1d7;border-radius:6px;background:#fff;color:#59636d;font:inherit;font-size:20px;line-height:1;cursor:pointer}
 .dismiss-delivery-button:focus-visible{outline:3px solid #f2a36d;outline-offset:2px}
+[data-sonner-toaster].kitchen-notifications{width:min(260px,calc(100vw - 16px));left:auto;right:max(8px,env(safe-area-inset-right));bottom:max(8px,env(safe-area-inset-bottom));pointer-events:none!important}
+[data-sonner-toaster].kitchen-notifications *{pointer-events:none!important}
+[data-sonner-toaster].kitchen-notifications [data-sonner-toast]{width:100%;padding:7px 9px;gap:6px;border:1px solid #cbd1d780;border-radius:6px;background:#ffffffe0;color:#704417;font-size:11px;line-height:1.4;box-shadow:0 2px 8px #00000012}
+[data-sonner-toaster].kitchen-notifications [data-title]{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden;font-weight:500}
 .kitchen{max-width:none;padding:8px max(8px,env(safe-area-inset-right)) 8px max(8px,env(safe-area-inset-left))}
 .kitchen .plates{gap:10px;flex-wrap:nowrap;align-items:stretch}
 .kitchen .plate-card{display:flex;flex-direction:column;width:calc((100% - 10px)/2);min-width:0}

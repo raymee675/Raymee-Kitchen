@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { toast } from "sonner";
+import { showKitchenError } from "./kitchen-notification";
 import { applySnapshotCommand, parseCommand, type Command, type Snapshot } from "./kitchen-model";
 import { createLocalTimestampClock } from "./local-timestamp-clock";
 import { LegacyDoughTimerResetRequiredError, LOCAL_BOARD_KEY, readLocalBoard, resetUnreadableLegacyDoughBoard, writeLocalBoard, type ParsedLocalBoardBackup } from "./local-kitchen-storage";
@@ -273,7 +273,7 @@ export function useKitchenLocal() {
         setConnection("offline");
       }
       try { publish(readLocalBoard()); } catch { /* Preserve the last confirmed view if storage cannot be reread. */ }
-      toast.error(message);
+      showKitchenError(message);
       throw error;
     }).finally(() => {
       pending.current.delete(pendingKey);
@@ -381,7 +381,7 @@ export function useKitchenLocal() {
         setStatusMessage(message);
         setConnection("offline");
       }
-      toast.error(message);
+      showKitchenError(message);
       throw error;
     }).finally(() => {
       backupRestoreInProgress.current = false;
@@ -444,7 +444,7 @@ export function useKitchenLocal() {
         setStatusMessage(message);
         setConnection("offline");
       }
-      toast.error(message);
+      showKitchenError(message);
       throw error;
     }).finally(() => {
       pending.current.delete(pendingKey);
