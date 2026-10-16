@@ -470,7 +470,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    if(action){event.preventDefault();perform(item,action);}
  }
   const latestUndo=snapshot?.undoHistory.at(-1);
-  const doughRemainingSeconds=doughBatch?Math.ceil(Math.max(0,doughBatch.deadlineAt-now)/1000):20*60;
+  const doughRemainingSeconds=doughBatch?Math.ceil(Math.max(0,doughBatch.deadlineAt-(doughBatch.completedAt??now))/1000):20*60;
   const doughRemainingLabel=`${String(Math.floor(doughRemainingSeconds/60)).padStart(2,"0")}:${String(doughRemainingSeconds%60).padStart(2,"0")}`;
   const doughPlacedCount=doughBatch?.placedEntityKeys.length??0;
   return <main className={`kitchen${__PAGES_MODE__?" pages-kitchen":""}`}>
@@ -514,7 +514,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
   <Dialog open={help} onOpenChange={setHelp}><DialogTrigger asChild><button className="icon-button" aria-label="使い方"><CircleHelp size={21}/></button></DialogTrigger><DialogContent className="help-dialog"><DialogHeader><DialogTitle>鉄板タイマーの使い方</DialogTitle><DialogDescription>{__PAGES_MODE__?"調理状態は、このスマートフォンのこのブラウザー内だけに保存されます。":"同じ画面を開いたスマホで、調理の状態を共有できます。"}</DialogDescription></DialogHeader>
   <ol className="help-list"><li>鉄板は縦2行・横3列の6マスです。新しい楕円は下段の空きマスをタップして配置します。上段は移動先専用で、新しい楕円は配置できません。</li><li>下段の待機中の楕円は、同じ鉄板・同じ列の上段が空いていればタップで上段へ移動します。上段が埋まっている場合は計測を始めます。移動できない配置の場合は元の場所に残り、理由を表示します。上段の待機中の楕円をタップすると固定90秒の計測が始まります。調理中の下段の楕円をタップすると、同じ鉄板・同じ列の真上にある空き上段マスへ移動します。移動先が使用中、または鉄板が過密の場合は移動せず、理由を表示します。上段の楕円は短いタップでは移動しません。</li><li>白・調理中・焼き上がりの楕円は、450ミリ秒以上長押ししてからドラッグすると、どちらの鉄板の空きマスにも移動できます。使用中のマス、鉄板間の隙間、鉄板の外で離すと元の場所に戻ります。長押し移動では計測を開始せず、焼き上がりも回収しません。移動は左上の戻る矢印で元に戻せます。楕円の削除機能はありません。</li><li>楕円の左右にある矢印をタップすると、待機中・計測中の温度を1℃ずつ変更できます。焼き上がり後は変更できません。初期値は96℃です。この温度は設定・記録用で、センサーの実測値ではありません。計測時間は常に90秒です。</li><li>残り0秒で楕円が赤くなります。赤い楕円をタップすると回収し、内部で30分の提供タイマーが始まります。上部の呼び出しエリアで、上の左右矢印でm、下の左右矢印でnを選び、中央のIDをタップすると完成ボックスに指定IDと提供状況を表示します。新しく呼び出したIDを上に、最大5件を縦に表示します。6件目からは最も古い表示を外します。同じIDの再呼び出しは重複せず先頭へ移ります。表示を外しても完成品や記録は消えません。矢印だけでは表示中の結果は変わりません。提供可能なら元の提供期限までの残り時間と「提供」ボタンが表示され、押すと提供済みになります。確認しても期限は延長されません。期限切れは提供不可能、まだ回収していないIDや該当しないIDは未準備です。</li>{__PAGES_MODE__&&<li>生地欄は未使用の残数 n/6 と残り時間だけを表示します。未開始は6/6・20:00で、生地欄全体をタップすると20分計測を開始します。計測中は生地欄を押せません。鉄板への新規配置が保存された時だけ残数が減り、加熱開始や移動では減りません。20分を過ぎると新規配置できず、生地欄をタップすると残りを廃棄し次の6個を開始します。6個を置き切った後も生地欄をタップして次の6個分を開始します。24個のID区間は6個ずつ4回のタイマーで使い切ります。90秒の加熱タイマーとは別です。</li>}</ol>
   <p className="help-note">左上の戻る矢印では直近50件までの楕円配置・鉄板上の移動を操作順に戻せます。以前の保存データに残る削除履歴も復元できます。タイマー開始、温度変更、完成ボックスへの移動、提供・提供不可の確定を行うと、それ以前の取り消し履歴は消えます。過密な旧データは位置を保って表示し、新規配置とその鉄板にある楕円の移動はできません。</p>
-  <p className="help-note">鉄板・呼び出し・完成ボックス・CSVのIDは同じ安定した番号です。提供や取り消しによって他のIDは詰め直しません。実行記録CSVはIDごとに1行です。以前の保存データでUUID形式のIDが残る場合はCSVに保持されますが、数値のm/n呼び出しでは照会できません。列名と列数は変わりません。鉄板投入時刻は配置の保存時、下段→上段移動時刻は移動の保存時に記録します。以前のデータなど時刻を取得できない場合は空欄です。移動を取り消すと移動前の時刻へ戻ります。「温度区間(℃・開始順)」と「区間加熱秒数(開始順)」は開始順のリストで、各位置が対応します。区切りは「 | 」で、温度不明の区間も対応する秒数と同じ位置に残ります。合計秒数と焼き上がり・保管・提供の時刻、最終ステータスも記録ごとに1回出力します。</p>
+  <p className="help-note">鉄板・呼び出し・完成ボックス・CSVのIDは同じ安定した番号です。提供や取り消しによって他のIDは詰め直しません。実行記録CSVはIDごとに1行、10列です。以前の保存データでUUID形式のIDが残る場合はCSVに保持されますが、数値のm/n呼び出しでは照会できません。鉄板投入時刻は配置の保存時、下段→上段移動時刻は移動の保存時に記録します。以前のデータなど時刻を取得できない場合は空欄です。移動を取り消すと移動前の時刻へ戻ります。「温度区間(℃・開始順)」は開始順のリストで、区切りは「 | 」です。温度不明の区間は「温度不明」として残ります。タイマー開始・回収・提供の時刻、30分タイマー停止時刻、最終ステータス、提供不可理由も記録ごとに1回出力します。</p>
   {__PAGES_MODE__?<>
     <p className="help-note">調理状態はこのスマートフォンのこのブラウザー内だけに保存され、PC版や別ブラウザーとは共有されません。サイトデータの削除、ブラウザー変更、端末交換で消えることがあります。定期的に「データ管理」からJSONバックアップを保存してください。CSVは完了した実行記録だけの書き出しで、盤面復元には使えません。</p>
     {kitchen.cacheState!=="ready"&&<p className="help-note">{kitchen.cacheState==="preparing"?"オフライン起動用の画面を準備しています。完了までインターネット接続を保ってください。":"オフライン起動用の保存を確認できません。必要に応じて再読み込みしてください。"}</p>}
@@ -556,6 +556,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
          <span className="delivery-id">{match.searchId}</span>
          <strong>{deliveryStatusLabels[match.status]}</strong>
          {match.status==="available"&&completionItem&&<><time aria-label={`提供可能な残り時間 ${remainingLabel}`}>{remainingLabel}</time><button type="button" className="serve-button" disabled={!available||isItemPending(completionItem)} onClick={()=>serveCompletion(match.entityKey)}>提供</button></>}
+         <button type="button" className="dismiss-delivery-button" aria-label={`ID ${match.searchId} の表示を提供ボックスから外す`} title="表示を外す" onClick={()=>setDeliverySearchIds(ids=>ids.filter(id=>id!==match.searchId))}>×</button>
        </div>;
      })}
    </div>}
