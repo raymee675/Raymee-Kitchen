@@ -423,7 +423,7 @@ export function normalizeExecutionRecords(value: unknown): ExecutionRecord[] {
         throw new Error("保存データの完成ボックス期限が正しくありません。");
       }
       if (service.servedAt !== null) {
-        if (service.servedAt < service.serveTimerStartedAt || service.servedAt >= service.serveDeadlineAt
+        if (service.servedAt < service.serveTimerStartedAt || service.servedAt > service.serveDeadlineAt
           || service.unavailableAt !== null || service.unavailableReason !== null) {
           throw new Error("保存データの提供時刻が正しくありません。");
         }
@@ -1123,6 +1123,29 @@ export function normalizeBoardData(input: {
     undoHistory:dense.undoHistory,
     ...(doughBatch === undefined ? {} : {doughBatch}),
   };
+}
+
+// Callers persist the returned snapshot before exposing automatic settlement.
+// One generation change protects queued commands when display IDs are reassigned.
+export function settleUnsearchedCompletions(snapshot: Snapshot, now: number): Snapshot {
+  const pendingKeys = new Set(snapshot.completionItems.filter(item => item.isRecalled === false).map(item => item.entityKey));
+  const settledKeys = new Set(snapshot.records.filter(record => pendingKeys.has(record.entityKey)
+    && record.serveTimerStartedAt !== null && record.serveDeadlineAt !== null
+    && record.servedAt === null && record.unavailableAt === null && record.unavailableReason === null
+    && now >= record.serveDeadlineAt).map(record => record.entityKey));
+  if (settledKeys.size === 0) return snapshot;
+  const generation = snapshot.generation + 1;
+  const revision = snapshot.revision + 1;
+  if (!Number.isSafeInteger(generation) || !Number.isSafeInteger(revision)) {
+    throw new Error("保存データの更新番号が上限に達したため、提供結果を保存できません。");
+  }
+  const board = normalizeBoardData({
+    ...snapshot,
+    generation,
+    records:snapshot.records.map(record => settledKeys.has(record.entityKey) ? {...record, servedAt:record.serveDeadlineAt} : record),
+    completionItems:snapshot.completionItems.filter(item => !settledKeys.has(item.entityKey)),
+  });
+  return {...snapshot, ...board, revision, serverNow:now};
 }
 
 export function completionStatus(record: ExecutionRecord, now: number): "holding" | "served" | "unavailable" | "legacy" {

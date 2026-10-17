@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { showKitchenError } from "./kitchen-notification";
-import { applySnapshotCommand, parseCommand, type Command, type Snapshot } from "./kitchen-model";
+import { applySnapshotCommand, parseCommand, settleUnsearchedCompletions, type Command, type Snapshot } from "./kitchen-model";
 import { createLocalTimestampClock } from "./local-timestamp-clock";
 import { LegacyDoughTimerResetRequiredError, LOCAL_BOARD_KEY, readLocalBoard, resetUnreadableLegacyDoughBoard, writeLocalBoard, type ParsedLocalBoardBackup } from "./local-kitchen-storage";
 
@@ -32,6 +32,7 @@ export function useKitchenLocal() {
   const recoverySourceRaw = useRef<string|null>(null);
   const legacyDoughResetSourceRaw = useRef<string|null>(null);
   const mutationQueue = useRef(Promise.resolve());
+  const syncing = useRef<Promise<void> | null>(null);
   const registration = useRef<ServiceWorkerRegistration | null>(null);
   const updateRequested = useRef(false);
   const clock = useRef<ReturnType<typeof createLocalTimestampClock> | null>(null);
@@ -82,10 +83,29 @@ export function useKitchenLocal() {
     }
   }, []);
 
-  const sync = useCallback(async () => {
-    if (!activeEditor.current || writeFailed.current) return;
-    try {
-      publish(readLocalBoard());
+  const saveSettlement = useCallback((current:Snapshot, time:number) => {
+    const next = settleUnsearchedCompletions(current, time);
+    if (next !== current) {
+      try { writeLocalBoard(next); }
+      catch (error) {
+        writeFailed.current = true;
+        setConnection("offline");
+        setStatusMessage("提供結果を端末へ保存できません。保存領域とサイトデータ設定を確認して開き直してください。");
+        throw error;
+      }
+    }
+    return next;
+  }, []);
+
+  const sync = useCallback(():Promise<void> => {
+    if (syncing.current) return syncing.current;
+    if (!activeEditor.current || writeFailed.current || backupRestoreInProgress.current) {
+      return Promise.reject(new Error("保存画面の準備ができていません。画面を開き直してください。"));
+    }
+    const operation = mutationQueue.current.then(() => {
+      if (!activeEditor.current || writeFailed.current) throw new Error("端末へ保存できません。画面を開き直してください。");
+      const time = currentTime();
+      publish({...saveSettlement(readLocalBoard(), time), serverNow:time});
       recoverySourceRaw.current = null;
       legacyDoughResetSourceRaw.current = null;
       setRecoveryAvailable(false);
@@ -93,14 +113,19 @@ export function useKitchenLocal() {
       setLegacyDoughResetAvailable(false);
       setStatusMessage(null);
       if (activeEditor.current) setConnection("online");
-    } catch (error) {
+    }).catch(error => {
       const message = error instanceof Error ? error.message : "保存データを読み取れません。";
-      prepareUnreadableBoardRecovery(error);
-      setStatusMessage(message);
+      if (!writeFailed.current) {
+        prepareUnreadableBoardRecovery(error);
+        setStatusMessage(message);
+      }
       setConnection("offline");
       throw error;
-    }
-  }, [prepareUnreadableBoardRecovery, publish]);
+    });
+    mutationQueue.current = operation.then(() => undefined, () => undefined);
+    syncing.current = operation.finally(() => { syncing.current = null; });
+    return syncing.current;
+  }, [currentTime, prepareUnreadableBoardRecovery, publish, saveSettlement]);
 
   useEffect(() => {
     alive.current = true;
@@ -119,16 +144,9 @@ export function useKitchenLocal() {
 
         activeEditor.current = true;
         try {
-          publish(readLocalBoard());
-          recoverySourceRaw.current = null;
-          legacyDoughResetSourceRaw.current = null;
-          setRecoveryAvailable(false);
-          setLegacyDoughResetRequired(false);
-          setLegacyDoughResetAvailable(false);
-          setStatusMessage(null);
-          setConnection("online");
+          await sync();
         } catch (error) {
-          prepareUnreadableBoardRecovery(error);
+          if (!writeFailed.current) prepareUnreadableBoardRecovery(error);
           setConnection("offline");
           setStatusMessage(error instanceof Error ? error.message : "保存データを読み取れません。");
         }
@@ -143,7 +161,18 @@ export function useKitchenLocal() {
     }, 0);
 
     const tick = window.setInterval(() => {
-      if (!document.hidden) setNow(currentTime());
+      if (!document.hidden) {
+        const time = currentTime();
+        setNow(time);
+        const current = state.current;
+        if (current && activeEditor.current && !writeFailed.current && !backupRestoreInProgress.current && !syncing.current) {
+          const recordsByKey = new Map(current.records.map(record => [record.entityKey, record]));
+          if (current.completionItems.some(item => {
+            const record = recordsByKey.get(item.entityKey);
+            return item.isRecalled === false && record?.serveDeadlineAt != null && time >= record.serveDeadlineAt;
+          })) void sync().catch(() => {});
+        }
+      }
     }, 100);
     const refreshOnResume = () => {
       if (!document.hidden) {
@@ -215,6 +244,7 @@ export function useKitchenLocal() {
     if (backupRestoreInProgress.current) throw new Error("バックアップを復元中です。完了してから操作してください。");
     if (legacyDoughResetRequired) throw new Error("旧24個タイマーの未完了セットがあります。全体リセットが必要です。");
     if (!activeEditor.current || !state.current) throw new Error("保存画面の準備ができていません。画面を開き直してください。");
+    if (writeFailed.current) throw new Error("端末へ保存できません。画面を開き直してください。");
     const command = parseCommand({...input, expectedGeneration:input.expectedGeneration ?? state.current.generation});
     const targetEntityKey = command.type === "create"
       ? command.operationId
@@ -228,9 +258,10 @@ export function useKitchenLocal() {
     pending.current.add(pendingKey);
     setPendingIds(new Set(pending.current));
     const operation = mutationQueue.current.then(() => {
-      if (!activeEditor.current) throw new Error("操作を保存できません。アプリを開き直してください。");
-      const current = readLocalBoard();
+      if (!activeEditor.current || writeFailed.current) throw new Error("操作を保存できません。アプリを開き直してください。");
       const now = currentTime();
+      const current = saveSettlement(readLocalBoard(), now);
+      publish(current);
       const applied = applySnapshotCommand(current, command, now);
       const next: Snapshot = {
         revision: current.revision + 1,
@@ -244,6 +275,7 @@ export function useKitchenLocal() {
         doughBatch:applied.doughBatch ?? null,
         serverNow: now,
       };
+      if (!Number.isSafeInteger(next.revision)) throw new Error("保存データの更新番号が上限に達したため保存できません。");
       writeLocalBoard(next);
       publish(next);
       setStatusMessage(null);
@@ -279,7 +311,7 @@ export function useKitchenLocal() {
       pending.current.delete(pendingKey);
       if (alive.current) setPendingIds(new Set(pending.current));
     });
-  }, [currentTime, legacyDoughResetRequired, prepareUnreadableBoardRecovery, publish]);
+  }, [currentTime, legacyDoughResetRequired, prepareUnreadableBoardRecovery, publish, saveSettlement]);
 
   const restoreBackup = useCallback((backup: ParsedLocalBoardBackup, expectedRevision: number|null): Promise<Snapshot> => {
     if (legacyDoughResetRequired) throw new Error("旧24個タイマーの未完了セットがあるため、バックアップ復元は停止しています。全体リセットが必要です。");
@@ -328,12 +360,12 @@ export function useKitchenLocal() {
       if (!Number.isSafeInteger(revision) || !Number.isSafeInteger(generation)) throw new Error("盤面の更新番号が上限に達したため復元できません。");
 
       const now = currentTime();
-      const next: Snapshot = {
+      const next = settleUnsearchedCompletions({
         ...backup.snapshot,
         revision,
         generation,
         serverNow:now,
-      };
+      }, now);
       writeLocalBoard(next);
       writeFailed.current = false;
       recoverySourceRaw.current = null;
@@ -472,6 +504,27 @@ export function useKitchenLocal() {
     restoreBackup,
     resetLegacyDoughData,
     sync,
+    prepareSnapshot: async () => {
+      await sync();
+      if (!state.current) throw new Error("盤面を読み取れません。");
+      return state.current;
+    },
+    prepareExportSnapshot: async () => {
+      if (backupRestoreInProgress.current) throw new Error("バックアップを復元中です。完了してから書き出してください。");
+      if (activeEditor.current && !writeFailed.current) {
+        try {
+          await sync();
+          if (!state.current) throw new Error("盤面を読み取れません。");
+          return state.current;
+        }
+        catch (error) { if (!writeFailed.current) throw error; }
+      }
+      if (!state.current) throw new Error("盤面を読み取れません。");
+      const time = currentTime();
+      // A recovery export may derive results from the last confirmed snapshot;
+      // it never publishes that derived state or claims it has been saved.
+      return {...settleUnsearchedCompletions(state.current, time), serverNow:time};
+    },
     currentTime,
     getSnapshot: () => state.current,
     statusMessage,

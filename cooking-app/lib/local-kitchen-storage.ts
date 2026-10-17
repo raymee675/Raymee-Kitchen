@@ -4,7 +4,7 @@ const siteSegment = typeof window === "undefined"
   ? "root"
   : encodeURIComponent(window.location.pathname.split("/").filter(Boolean)[0] ?? "root");
 export const LOCAL_BOARD_KEY = `teppan-timer:${siteSegment}:single-phone-board:v1`;
-export const LOCAL_BOARD_SCHEMA = 12;
+export const LOCAL_BOARD_SCHEMA = 13;
 export const LOCAL_BACKUP_FORMAT = "teppan-timer-pages-board";
 export const LOCAL_BACKUP_FORMAT_VERSION = 1;
 
@@ -112,6 +112,9 @@ function decode(raw: string | null): StoredBoard {
     strictArchiveIds:schemaVersion >= 11,
   });
   let doughBatch = board.doughBatch ?? null;
+  // Earlier UI searches were not persisted, so existing holdings cannot safely
+  // be assumed unsearched. Only schema 13 false values authorize settlement.
+  if (schemaVersion < 13) board.completionItems = board.completionItems.map(item => ({...item, isRecalled:true}));
   if (legacyDoughSchema && doughBatch) {
     if (doughBatch.placedEntityKeys.length !== DOUGH_ID_BLOCK_SIZE || doughBatch.completedAt === null) {
       throw new LegacyDoughTimerResetRequiredError();

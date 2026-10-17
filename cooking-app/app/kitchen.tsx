@@ -30,6 +30,8 @@ type KitchenController = {
  sync:()=>Promise<void>;
  currentTime:()=>number;
  getSnapshot:()=>Snapshot|null;
+ prepareSnapshot?:()=>Promise<Snapshot>;
+ prepareExportSnapshot?:()=>Promise<Snapshot>;
  statusMessage?:string|null;
  cacheState?:"preparing"|"ready"|"unavailable";
  updateReady?:boolean;
@@ -140,6 +142,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  const [recallM,setRecallM] = useState(1);
  const [recallN,setRecallN] = useState(1);
  const servingEntityKeys=useRef(new Set<string>());
+ const searching=useRef(false);
  const resetSubmitting=useRef(false);
  const contact = useRef<Contact|null>(null);
  const backupFileInput = useRef<HTMLInputElement|null>(null);
@@ -226,14 +229,48 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
      showKitchenError(error instanceof Error?error.message:"提供を保存できませんでした。");
    }
  }
- function exportRecords() {
-    if (!records.length) return;
-    downloadExecutionRecords(records, kitchen.currentTime());
-  }
-  function exportBoardBackup() {
-    if (!snapshot) return;
+ async function searchDelivery() {
+   if(searching.current)return;
+   searching.current=true;
+   const searchId=recallId;
+   const controller=actions.current;
+   try {
+     if(__PAGES_MODE__&&controller.prepareSnapshot){
+       const latest=await controller.prepareSnapshot();
+       const keys=findDeliverySearchMatches(latest,searchId,controller.currentTime()).map(match=>match.entityKey);
+       for(const entityKey of keys){
+         const current=controller.getSnapshot();
+         const item=current?.completionItems.find(item=>item.entityKey===entityKey);
+         const record=current?.records.find(record=>record.entityKey===entityKey);
+         if(!current||!item||item.isRecalled!==false||deliveryStatus(record,true,controller.currentTime())!=="available")continue;
+         try {
+           await controller.send({operationId:createUuid(),type:"recall",id:item.id,expectedVersion:item.version,expectedGeneration:current.generation,expectedEntityKey:entityKey});
+         } catch(error) {
+           // The deadline may arrive while the recall waits in the save queue.
+           // A confirmed automatic settlement is a valid search result.
+           const settled=controller.getSnapshot()?.records.find(record=>record.entityKey===entityKey);
+           if(settled?.servedAt===null||settled?.servedAt===undefined||controller.getSnapshot()?.completionItems.some(item=>item.entityKey===entityKey))throw error;
+         }
+       }
+       await controller.prepareSnapshot();
+     }
+     setDeliverySearchIds(ids=>[searchId,...ids.filter(id=>id!==searchId)].slice(0,5));
+   } catch(error) {
+     showKitchenError(error instanceof Error?error.message:"検索履歴を保存できませんでした。");
+   } finally { searching.current=false; }
+ }
+ async function exportRecords() {
     try {
-      const content = createLocalBoardBackup(snapshot, kitchen.currentTime());
+      const current=kitchen.prepareExportSnapshot?await kitchen.prepareExportSnapshot():kitchen.getSnapshot();
+      if (!current?.records.length) return;
+      downloadExecutionRecords(current.records, kitchen.prepareExportSnapshot?current.serverNow:kitchen.currentTime());
+    } catch(error) { showKitchenError(error instanceof Error?error.message:"実行記録を書き出せませんでした。"); }
+  }
+  async function exportBoardBackup() {
+    try {
+      const current=kitchen.prepareExportSnapshot?await kitchen.prepareExportSnapshot():kitchen.getSnapshot();
+      if (!current) return;
+      const content = createLocalBoardBackup(current, kitchen.prepareExportSnapshot?current.serverNow:kitchen.currentTime());
       const date = new Date(kitchen.currentTime()).toISOString().slice(0,10);
       const url = URL.createObjectURL(new Blob([content], {type:"application/json;charset=utf-8"}));
       const link = document.createElement("a");
@@ -512,7 +549,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
     </DialogContent>
   </Dialog>}
   <Dialog open={help} onOpenChange={setHelp}><DialogTrigger asChild><button className="icon-button" aria-label="使い方"><CircleHelp size={21}/></button></DialogTrigger><DialogContent className="help-dialog"><DialogHeader><DialogTitle>鉄板タイマーの使い方</DialogTitle><DialogDescription>{__PAGES_MODE__?"調理状態は、このスマートフォンのこのブラウザー内だけに保存されます。":"同じ画面を開いたスマホで、調理の状態を共有できます。"}</DialogDescription></DialogHeader>
-  <ol className="help-list"><li>鉄板は縦2行・横3列の6マスです。新しい楕円は下段の空きマスをタップして配置します。上段は移動先専用で、新しい楕円は配置できません。</li><li>下段の待機中の楕円は、同じ鉄板・同じ列の上段が空いていればタップで上段へ移動します。上段が埋まっている場合は計測を始めます。移動できない配置の場合は元の場所に残り、理由を表示します。上段の待機中の楕円をタップすると固定90秒の計測が始まります。調理中の下段の楕円をタップすると、同じ鉄板・同じ列の真上にある空き上段マスへ移動します。移動先が使用中、または鉄板が過密の場合は移動せず、理由を表示します。上段の楕円は短いタップでは移動しません。</li><li>白・調理中・焼き上がりの楕円は、450ミリ秒以上長押ししてからドラッグすると、どちらの鉄板の空きマスにも移動できます。使用中のマス、鉄板間の隙間、鉄板の外で離すと元の場所に戻ります。長押し移動では計測を開始せず、焼き上がりも回収しません。移動は左上の戻る矢印で元に戻せます。楕円の削除機能はありません。</li><li>楕円の左右にある矢印をタップすると、待機中・計測中の温度を1℃ずつ変更できます。焼き上がり後は変更できません。初期値は96℃です。この温度は設定・記録用で、センサーの実測値ではありません。計測時間は常に90秒です。</li><li>残り0秒で楕円が赤くなります。赤い楕円をタップすると回収し、内部で30分の提供タイマーが始まります。上部の呼び出しエリアで、上の左右矢印でm、下の左右矢印でnを選び、中央のIDをタップすると完成ボックスに指定IDと提供状況を表示します。新しく呼び出したIDを上に、最大5件を縦に表示します。6件目からは最も古い表示を外します。同じIDの再呼び出しは重複せず先頭へ移ります。表示を外しても完成品や記録は消えません。矢印だけでは表示中の結果は変わりません。提供可能なら元の提供期限までの残り時間と「提供」ボタンが表示され、押すと提供済みになります。確認しても期限は延長されません。期限切れは提供不可能、まだ回収していないIDや該当しないIDは未準備です。</li>{__PAGES_MODE__&&<li>生地欄は未使用の残数 n/6 と残り時間だけを表示します。未開始は6/6・20:00で、生地欄全体をタップすると20分計測を開始します。計測中は生地欄を押せません。鉄板への新規配置が保存された時だけ残数が減り、加熱開始や移動では減りません。20分を過ぎると新規配置できず、生地欄をタップすると残りを廃棄し次の6個を開始します。6個を置き切った後も生地欄をタップして次の6個分を開始します。24個のID区間は6個ずつ4回のタイマーで使い切ります。90秒の加熱タイマーとは別です。</li>}</ol>
+  <ol className="help-list"><li>鉄板は縦2行・横3列の6マスです。新しい楕円は下段の空きマスをタップして配置します。上段は移動先専用で、新しい楕円は配置できません。</li><li>下段の待機中の楕円は、同じ鉄板・同じ列の上段が空いていればタップで上段へ移動します。上段が埋まっている場合は計測を始めます。移動できない配置の場合は元の場所に残り、理由を表示します。上段の待機中の楕円をタップすると固定90秒の計測が始まります。調理中の下段の楕円をタップすると、同じ鉄板・同じ列の真上にある空き上段マスへ移動します。移動先が使用中、または鉄板が過密の場合は移動せず、理由を表示します。上段の楕円は短いタップでは移動しません。</li><li>白・調理中・焼き上がりの楕円は、450ミリ秒以上長押ししてからドラッグすると、どちらの鉄板の空きマスにも移動できます。使用中のマス、鉄板間の隙間、鉄板の外で離すと元の場所に戻ります。長押し移動では計測を開始せず、焼き上がりも回収しません。移動は左上の戻る矢印で元に戻せます。楕円の削除機能はありません。</li><li>楕円の左右にある矢印をタップすると、待機中・計測中の温度を1℃ずつ変更できます。焼き上がり後は変更できません。初期値は96℃です。この温度は設定・記録用で、センサーの実測値ではありません。計測時間は常に90秒です。</li><li>残り0秒で楕円が赤くなります。赤い楕円をタップすると回収し、内部で30分の提供タイマーが始まります。上部の呼び出しエリアで、上の左右矢印でm、下の左右矢印でnを選び、中央のIDをタップすると完成ボックスに指定IDと提供状況を表示します。新しく呼び出したIDを上に、最大5件を縦に表示します。6件目からは最も古い表示を外します。同じIDの再呼び出しは重複せず先頭へ移ります。表示を外しても完成品や記録は消えません。矢印だけでは表示中の結果は変わりません。提供可能なら元の提供期限までの残り時間と「提供」ボタンが表示され、押すと提供済みになります。確認しても期限は延長されません。{__PAGES_MODE__?"30分間一度も検索されなかった完成品は期限時刻に提供済みになります。一度でも検索した完成品は期限切れで提供不可能になります。検索履歴は表示解除・再読込でも保持します。以前の保存データの保管品は検索履歴が不明なため、従来どおり期限切れで提供不可能になります。":"期限切れは提供不可能です。"}まだ回収していないIDや該当しないIDは未準備です。</li>{__PAGES_MODE__&&<li>生地欄は未使用の残数 n/6 と残り時間だけを表示します。未開始は6/6・20:00で、生地欄全体をタップすると20分計測を開始します。計測中は生地欄を押せません。鉄板への新規配置が保存された時だけ残数が減り、加熱開始や移動では減りません。20分を過ぎると新規配置できず、生地欄をタップすると残りを廃棄し次の6個を開始します。6個を置き切った後も生地欄をタップして次の6個分を開始します。24個のID区間は6個ずつ4回のタイマーで使い切ります。90秒の加熱タイマーとは別です。</li>}</ol>
   <p className="help-note">左上の戻る矢印では直近50件までの楕円配置・鉄板上の移動を操作順に戻せます。以前の保存データに残る削除履歴も復元できます。タイマー開始、温度変更、完成ボックスへの移動、提供・提供不可の確定を行うと、それ以前の取り消し履歴は消えます。過密な旧データは位置を保って表示し、新規配置とその鉄板にある楕円の移動はできません。</p>
   <p className="help-note">鉄板・呼び出し・完成ボックス・CSVのIDは同じ安定した番号です。提供や取り消しによって他のIDは詰め直しません。実行記録CSVはIDごとに1行、10列です。以前の保存データでUUID形式のIDが残る場合はCSVに保持されますが、数値のm/n呼び出しでは照会できません。鉄板投入時刻は配置の保存時、下段→上段移動時刻は移動の保存時に記録します。以前のデータなど時刻を取得できない場合は空欄です。移動を取り消すと移動前の時刻へ戻ります。「温度区間(℃・開始順)」は開始順のリストで、区切りは「 | 」です。温度不明の区間は「温度不明」として残ります。タイマー開始・回収・提供の時刻、30分タイマー停止時刻、最終ステータス、提供不可理由も記録ごとに1回出力します。</p>
   {__PAGES_MODE__?<>
@@ -531,7 +568,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  </div>
    <div className="timer-recall" role="group" aria-label="提供状況の呼び出し">
      <div className="timer-recall-icon">
-       <button className="timer-recall-center" type="button" disabled={!snapshot} aria-label={`ID ${recallId} の提供状況を呼び出す`} onClick={()=>setDeliverySearchIds(ids=>[recallId,...ids.filter(id=>id!==recallId)].slice(0,5))}><strong>{recallId}</strong></button>
+       <button className="timer-recall-center" type="button" disabled={!snapshot||(__PAGES_MODE__&&!available)} aria-label={`ID ${recallId} の提供状況を呼び出す`} onClick={searchDelivery}><strong>{recallId}</strong></button>
        <div className="timer-recall-arrows timer-recall-m">
          <button type="button" aria-label="IDのmを1減らす" disabled={!snapshot||recallM===1} onClick={()=>setRecallM(value=>Math.max(1,value-1))}><ArrowLeft size={18}/></button>
          <span>{recallM}</span>
