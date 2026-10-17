@@ -10,12 +10,15 @@ import { DOUGH_ID_BLOCK_SIZE, DOUGH_TIMER_BATCH_SIZE, GRID_CELLS, GRID_COLUMNS, 
 import { downloadExecutionRecords } from "@/lib/execution-record-export";
 import { createLocalBoardBackup, parseLocalBoardBackup, type ParsedLocalBoardBackup } from "@/lib/local-kitchen-storage";
 import { createUuid } from "@/lib/uuid";
+import { completionVariantLabels, resolveCompletionVariant, type CompletionVariant } from "@/lib/completion-variant";
 
 type Contact = { pointerId:number; expectedGeneration:number; expectedDoughBatchId:string|null; expectedNextPancakeOrdinal:number; x:number; y:number; max:number; startedAt:number; item:Pancake|null; itemEntityKey:string|null; itemId:string|null; itemVersion:number|null; action:"left"|"right"|null; plate:1|2; targetX:number; targetY:number; holdTimer:number|null; holdCancelled:boolean; longPressArmed:boolean; dragging:boolean };
 type DropTarget = {plate:1|2; cellIndex:number; reason:"missing"|"occupied"|"over_capacity"|null};
 type MoveCue = {entityKey:string; dragging:boolean; target:DropTarget|null};
 type ModelContext = { registerTool:(tool:Record<string,unknown>, options:{signal:AbortSignal}) => unknown };
 type KitchenController = {
+ completionVariant?:CompletionVariant;
+ waitForIdle?:()=>Promise<void>;
  snapshot:Snapshot|null;
  now:number;
  connection:"connecting"|"online"|"offline"|"unauthorized";
@@ -131,6 +134,10 @@ function useScreenWakeLock(enabled:boolean) {
 
 function KitchenView({useController}:{useController:()=>KitchenController}) {
  const kitchen = useController();
+ const completionVariant=kitchen.completionVariant??"recall";
+ const allCompletions=completionVariant==="all";
+ const [variantSwitching,setVariantSwitching]=useState(false);
+ const switching=useRef(false);
  const {snapshot, now, connection, pendingIds, send, sync} = kitchen;
  const [help,setHelp] = useState(false);
  const [dataManagementOpen,setDataManagementOpen] = useState(false);
@@ -156,7 +163,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
  const plateSvgs = useRef<Partial<Record<1|2,SVGSVGElement|null>>>({});
  const actions = useRef(kitchen);
  useEffect(()=>{actions.current=kitchen;},[kitchen]);
- const available = connection === "online" && !kitchen.backupBusy;
+ const available = connection === "online" && !kitchen.backupBusy && !variantSwitching;
  const canRestoreBoard = !kitchen.legacyDoughResetRequired && Boolean(kitchen.recoveryAvailable || (snapshot && available));
  const observedGeneration = useRef<number|null>(snapshot?.generation ?? null);
  useEffect(()=>{
@@ -219,14 +226,32 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    const item=latest?.completionItems.find(item=>item.entityKey===entityKey);
    const record=latest?.records.find(record=>record.entityKey===entityKey);
    if(!latest||!item||controller.connection!=="online"||controller.backupBusy||servingEntityKeys.current.has(entityKey)
-     ||controller.pendingIds.has(__PAGES_MODE__?entityKey:item.id)||deliveryStatus(record,true,controller.currentTime())!=="available")return;
+     ||switching.current||controller.pendingIds.has(__PAGES_MODE__?entityKey:item.id)
+     ||(!allCompletions&&deliveryStatus(record,true,controller.currentTime())!=="available"))return;
    servingEntityKeys.current.add(entityKey);
    try {
-     void controller.send({operationId:createUuid(),type:"remove",id:item.id,expectedVersion:item.version,expectedGeneration:latest.generation})
+     void controller.send({operationId:createUuid(),type:"remove",id:item.id,expectedVersion:item.version,expectedGeneration:latest.generation,...(allCompletions?{expectedEntityKey:entityKey}:{})})
        .catch(()=>{}).finally(()=>servingEntityKeys.current.delete(entityKey));
    } catch(error) {
      servingEntityKeys.current.delete(entityKey);
      showKitchenError(error instanceof Error?error.message:"提供を保存できませんでした。");
+   }
+ }
+ async function switchCompletionVariant(next:CompletionVariant) {
+   const controller=actions.current;
+   if(next===completionVariant||switching.current||controller.backupBusy||controller.pendingIds.size>0)return;
+   switching.current=true;
+   setVariantSwitching(true);
+   try {
+     await controller.waitForIdle?.();
+     const url=new URL(window.location.href);
+     if(next==="all")url.searchParams.set("completion","all");
+     else url.searchParams.delete("completion");
+     window.location.assign(url.href);
+   } catch(error) {
+     switching.current=false;
+     setVariantSwitching(false);
+     showKitchenError(error instanceof Error?error.message:"方式を切り替えられませんでした。");
    }
  }
  async function searchDelivery() {
@@ -270,12 +295,12 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
     try {
       const current=kitchen.prepareExportSnapshot?await kitchen.prepareExportSnapshot():kitchen.getSnapshot();
       if (!current) return;
-      const content = createLocalBoardBackup(current, kitchen.prepareExportSnapshot?current.serverNow:kitchen.currentTime());
+      const content = createLocalBoardBackup(current, kitchen.prepareExportSnapshot?current.serverNow:kitchen.currentTime(), completionVariant);
       const date = new Date(kitchen.currentTime()).toISOString().slice(0,10);
       const url = URL.createObjectURL(new Blob([content], {type:"application/json;charset=utf-8"}));
       const link = document.createElement("a");
       link.href = url;
-      link.download = `teppan-timer-pages-backup-${date}.json`;
+      link.download = `teppan-timer-pages-backup-${completionVariant}-${date}.json`;
       link.click();
       window.setTimeout(()=>URL.revokeObjectURL(url),1000);
     } catch (error) {
@@ -290,7 +315,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
     setBackupDraft(null);
     if(file.size>10*1024*1024){showKitchenError("バックアップファイルは10MB以下を選んでください。現在の盤面は変更していません。");return;}
     setBackupReading(true);
-    void file.text().then(parseLocalBoardBackup).then(backup=>{
+    void file.text().then(raw=>parseLocalBoardBackup(raw,completionVariant)).then(backup=>{
       setBackupDraft(backup);
     }).catch(error=>{
       showKitchenError(error instanceof Error?error.message:"バックアップを読み込めませんでした。現在の盤面は変更していません。");
@@ -510,7 +535,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
   const doughRemainingSeconds=doughBatch?Math.ceil(Math.max(0,doughBatch.deadlineAt-(doughBatch.completedAt??now))/1000):20*60;
   const doughRemainingLabel=`${String(Math.floor(doughRemainingSeconds/60)).padStart(2,"0")}:${String(doughRemainingSeconds%60).padStart(2,"0")}`;
   const doughPlacedCount=doughBatch?.placedEntityKeys.length??0;
-  return <main className={`kitchen${__PAGES_MODE__?" pages-kitchen":""}`}>
+  return <main className={`kitchen${__PAGES_MODE__?" pages-kitchen":""}${allCompletions?" all-completions-kitchen":""}`}>
  <Toaster className="kitchen-notifications" position="bottom-right" theme="light" visibleToasts={1} duration={2500} offset={8} mobileOffset={8} toastOptions={{closeButton:false}}/>
  <div className="workspace-controls">
  <div className="control-left">
@@ -526,9 +551,14 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
     </DialogContent>
   </Dialog>
   {__PAGES_MODE__&&<Dialog open={dataManagementOpen} onOpenChange={open=>{setDataManagementOpen(open);if(!open){setBackupDraft(null);setBackupReading(false);}}}>
-    <DialogTrigger asChild><button className="update-button export-button data-management-trigger" aria-label="データ管理" title="データ管理" disabled={!canRestoreBoard}><Database size={15}/></button></DialogTrigger>
+    <DialogTrigger asChild><button className="update-button export-button data-management-trigger" aria-label="データ管理" title="データ管理" disabled={pendingIds.size>0||kitchen.backupBusy||variantSwitching}><Database size={15}/></button></DialogTrigger>
     <DialogContent className="data-management-dialog">
       <DialogHeader><DialogTitle>データ管理</DialogTitle><DialogDescription className="sr-only">バックアップと記録の操作</DialogDescription></DialogHeader>
+      <fieldset className="completion-variant-choice" disabled={pendingIds.size>0||kitchen.backupBusy||variantSwitching}>
+        <legend>提供ボックス：{completionVariantLabels[completionVariant]}</legend>
+        <div>{(["recall","all"] as const).map(variant=><button key={variant} type="button" aria-pressed={variant===completionVariant} disabled={variant===completionVariant} onClick={()=>void switchCompletionVariant(variant)}>{completionVariantLabels[variant]}</button>)}</div>
+        <p>データは方式別に保存されます。切替先へ現在の盤面は移りません。</p>
+      </fieldset>
       <div className="data-management-actions">
         <button type="button" className="data-action-button" disabled={!snapshot||!available} onClick={exportBoardBackup}><Database size={18}/><span><strong>盤面バックアップを保存</strong></span></button>
         <button type="button" className="data-action-button" disabled={!snapshot||!available||records.length===0} onClick={exportRecords}><Download size={18}/><span><strong>実行記録CSVを書き出す</strong></span></button>
@@ -537,6 +567,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
       </div>
       {backupDraft&&<section className="backup-preview" aria-live="polite">
         <h3>復元するバックアップ</h3>
+        <p>方式：{completionVariantLabels[backupDraft.completionVariant]}</p>
         <p>作成日時：{new Date(backupDraft.exportedAt).toLocaleString("ja-JP")}</p>
         <p>読み込み後：鉄板上の楕円 {backupDraft.snapshot.items.length}枚・完成ボックス {backupDraft.snapshot.completionItems.length}個・実行記録 {backupDraft.snapshot.records.length}件</p>
         <p>生地セット：{backupDraft.snapshot.doughBatch?`配置済み ${backupDraft.snapshot.doughBatch.placedEntityKeys.length}/${DOUGH_TIMER_BATCH_SIZE}個・期限 ${localClockLabel(backupDraft.snapshot.doughBatch.deadlineAt)}`:"未開始"}</p>
@@ -549,11 +580,11 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
     </DialogContent>
   </Dialog>}
   <Dialog open={help} onOpenChange={setHelp}><DialogTrigger asChild><button className="icon-button" aria-label="使い方"><CircleHelp size={21}/></button></DialogTrigger><DialogContent className="help-dialog"><DialogHeader><DialogTitle>鉄板タイマーの使い方</DialogTitle><DialogDescription>{__PAGES_MODE__?"調理状態は、このスマートフォンのこのブラウザー内だけに保存されます。":"同じ画面を開いたスマホで、調理の状態を共有できます。"}</DialogDescription></DialogHeader>
-  <ol className="help-list"><li>鉄板は縦2行・横3列の6マスです。新しい楕円は下段の空きマスをタップして配置します。上段は移動先専用で、新しい楕円は配置できません。</li><li>下段の待機中の楕円は、同じ鉄板・同じ列の上段が空いていればタップで上段へ移動します。上段が埋まっている場合は計測を始めます。移動できない配置の場合は元の場所に残り、理由を表示します。上段の待機中の楕円をタップすると固定90秒の計測が始まります。調理中の下段の楕円をタップすると、同じ鉄板・同じ列の真上にある空き上段マスへ移動します。移動先が使用中、または鉄板が過密の場合は移動せず、理由を表示します。上段の楕円は短いタップでは移動しません。</li><li>白・調理中・焼き上がりの楕円は、450ミリ秒以上長押ししてからドラッグすると、どちらの鉄板の空きマスにも移動できます。使用中のマス、鉄板間の隙間、鉄板の外で離すと元の場所に戻ります。長押し移動では計測を開始せず、焼き上がりも回収しません。移動は左上の戻る矢印で元に戻せます。楕円の削除機能はありません。</li><li>楕円の左右にある矢印をタップすると、待機中・計測中の温度を1℃ずつ変更できます。焼き上がり後は変更できません。初期値は96℃です。この温度は設定・記録用で、センサーの実測値ではありません。計測時間は常に90秒です。</li><li>残り0秒で楕円が赤くなります。赤い楕円をタップすると回収し、内部で30分の提供タイマーが始まります。上部の呼び出しエリアで、上の左右矢印でm、下の左右矢印でnを選び、中央のIDをタップすると完成ボックスに指定IDと提供状況を表示します。新しく呼び出したIDを上に、最大5件を縦に表示します。6件目からは最も古い表示を外します。同じIDの再呼び出しは重複せず先頭へ移ります。表示を外しても完成品や記録は消えません。矢印だけでは表示中の結果は変わりません。提供可能なら元の提供期限までの残り時間と「提供」ボタンが表示され、押すと提供済みになります。確認しても期限は延長されません。{__PAGES_MODE__?"30分間一度も検索されなかった完成品は期限時刻に提供済みになります。一度でも検索した完成品は期限切れで提供不可能になります。検索履歴は表示解除・再読込でも保持します。以前の保存データの保管品は検索履歴が不明なため、従来どおり期限切れで提供不可能になります。":"期限切れは提供不可能です。"}まだ回収していないIDや該当しないIDは未準備です。</li>{__PAGES_MODE__&&<li>生地欄は未使用の残数 n/6 と残り時間だけを表示します。未開始は6/6・20:00で、生地欄全体をタップすると20分計測を開始します。計測中は生地欄を押せません。鉄板への新規配置が保存された時だけ残数が減り、加熱開始や移動では減りません。20分を過ぎると新規配置できず、生地欄をタップすると残りを廃棄し次の6個を開始します。6個を置き切った後も生地欄をタップして次の6個分を開始します。24個のID区間は6個ずつ4回のタイマーで使い切ります。90秒の加熱タイマーとは別です。</li>}</ol>
+  <ol className="help-list"><li>鉄板は縦2行・横3列の6マスです。新しい楕円は下段の空きマスをタップして配置します。上段は移動先専用で、新しい楕円は配置できません。</li><li>下段の待機中の楕円は、同じ鉄板・同じ列の上段が空いていればタップで上段へ移動します。上段が埋まっている場合は計測を始めます。移動できない配置の場合は元の場所に残り、理由を表示します。上段の待機中の楕円をタップすると固定90秒の計測が始まります。調理中の下段の楕円をタップすると、同じ鉄板・同じ列の真上にある空き上段マスへ移動します。移動先が使用中、または鉄板が過密の場合は移動せず、理由を表示します。上段の楕円は短いタップでは移動しません。</li><li>白・調理中・焼き上がりの楕円は、450ミリ秒以上長押ししてからドラッグすると、どちらの鉄板の空きマスにも移動できます。使用中のマス、鉄板間の隙間、鉄板の外で離すと元の場所に戻ります。長押し移動では計測を開始せず、焼き上がりも回収しません。移動は左上の戻る矢印で元に戻せます。楕円の削除機能はありません。</li><li>楕円の左右にある矢印をタップすると、待機中・計測中の温度を1℃ずつ変更できます。焼き上がり後は変更できません。初期値は96℃です。この温度は設定・記録用で、センサーの実測値ではありません。計測時間は常に90秒です。</li><li>残り0秒で楕円が赤くなります。赤い楕円をタップすると回収し、内部で30分の提供タイマーが始まります。{allCompletions?<>完成品は全件自動表示されます。一覧はスクロールでき、各行の「管理終了」でその個体のタイマーと管理を終了します。期限前なら提供済み、期限以降なら提供不可として記録を残します。期限が来ただけでは行を外さず、自動提供済みにしません。</>:<>上部の呼び出しエリアで、上の左右矢印でm、下の左右矢印でnを選び、中央のIDをタップすると完成ボックスに指定IDと提供状況を表示します。新しく呼び出したIDを上に、最大5件を縦に表示します。6件目からは最も古い表示を外します。同じIDの再呼び出しは重複せず先頭へ移ります。表示を外しても完成品や記録は消えません。矢印だけでは表示中の結果は変わりません。提供可能なら元の提供期限までの残り時間と「提供」ボタンが表示され、押すと提供済みになります。確認しても期限は延長されません。{__PAGES_MODE__?"30分間一度も検索されなかった完成品は期限時刻に提供済みになります。一度でも検索した完成品は期限切れで提供不可能になります。検索履歴は表示解除・再読込でも保持します。以前の保存データの保管品は検索履歴が不明なため、従来どおり期限切れで提供不可能になります。":"期限切れは提供不可能です。"}まだ回収していないIDや該当しないIDは未準備です。</>}</li>{__PAGES_MODE__&&<li>生地欄は未使用の残数 n/6 と残り時間だけを表示します。未開始は6/6・20:00で、生地欄全体をタップすると20分計測を開始します。計測中は生地欄を押せません。鉄板への新規配置が保存された時だけ残数が減り、加熱開始や移動では減りません。20分を過ぎると新規配置できず、生地欄をタップすると残りを廃棄し次の6個を開始します。6個を置き切った後も生地欄をタップして次の6個分を開始します。24個のID区間は6個ずつ4回のタイマーで使い切ります。90秒の加熱タイマーとは別です。</li>}</ol>
   <p className="help-note">左上の戻る矢印では直近50件までの楕円配置・鉄板上の移動を操作順に戻せます。以前の保存データに残る削除履歴も復元できます。タイマー開始、温度変更、完成ボックスへの移動、提供・提供不可の確定を行うと、それ以前の取り消し履歴は消えます。過密な旧データは位置を保って表示し、新規配置とその鉄板にある楕円の移動はできません。</p>
   <p className="help-note">鉄板・呼び出し・完成ボックス・CSVのIDは同じ安定した番号です。提供や取り消しによって他のIDは詰め直しません。実行記録CSVはIDごとに1行、10列です。以前の保存データでUUID形式のIDが残る場合はCSVに保持されますが、数値のm/n呼び出しでは照会できません。鉄板投入時刻は配置の保存時、下段→上段移動時刻は移動の保存時に記録します。以前のデータなど時刻を取得できない場合は空欄です。移動を取り消すと移動前の時刻へ戻ります。「温度区間(℃・開始順)」は開始順のリストで、区切りは「 | 」です。温度不明の区間は「温度不明」として残ります。タイマー開始・回収・提供の時刻、30分タイマー停止時刻、最終ステータス、提供不可理由も記録ごとに1回出力します。</p>
   {__PAGES_MODE__?<>
-    <p className="help-note">調理状態はこのスマートフォンのこのブラウザー内だけに保存され、PC版や別ブラウザーとは共有されません。サイトデータの削除、ブラウザー変更、端末交換で消えることがあります。定期的に「データ管理」からJSONバックアップを保存してください。CSVは完了した実行記録だけの書き出しで、盤面復元には使えません。</p>
+    <p className="help-note">提供ボックス方式は「{completionVariantLabels[completionVariant]}」です。「データ管理」で方式を選べます。データは方式別に保存され、切り替えても盤面は移りません。閉じている間も期限は進みます。調理状態はこのスマートフォンのこのブラウザー内だけに保存され、PC版や別ブラウザーとは共有されません。サイトデータの削除、ブラウザー変更、端末交換で消えることがあります。定期的に「データ管理」からJSONバックアップを保存してください。CSVは完了した実行記録だけの書き出しで、盤面復元には使えません。</p>
     {kitchen.cacheState!=="ready"&&<p className="help-note">{kitchen.cacheState==="preparing"?"オフライン起動用の画面を準備しています。完了までインターネット接続を保ってください。":"オフライン起動用の保存を確認できません。必要に応じて再読み込みしてください。"}</p>}
     <p className="help-note">調理中は画面を表示してご利用ください。画面ロック中にタイマー通知やアラームを鳴らす保証はありません。上部に更新アイコンが表示されたら、調理を終えてから押してください。</p>
   </>:<>
@@ -566,7 +597,7 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
    <span className="dough-count">{DOUGH_TIMER_BATCH_SIZE-doughPlacedCount}/{DOUGH_TIMER_BATCH_SIZE}</span><strong className="dough-clock">{doughStatus==="not_started"?"20:00":doughRemainingLabel}</strong>
  </button>}
  </div>
-   <div className="timer-recall" role="group" aria-label="提供状況の呼び出し">
+   {!allCompletions&&<div className="timer-recall" role="group" aria-label="提供状況の呼び出し">
      <div className="timer-recall-icon">
        <button className="timer-recall-center" type="button" disabled={!snapshot||(__PAGES_MODE__&&!available)} aria-label={`ID ${recallId} の提供状況を呼び出す`} onClick={searchDelivery}><strong>{recallId}</strong></button>
        <div className="timer-recall-arrows timer-recall-m">
@@ -581,9 +612,23 @@ function KitchenView({useController}:{useController:()=>KitchenController}) {
        </div>
      </div>
 
-   </div>
-  <section id="completion-box" tabIndex={-1} className="completion-box" aria-label="完成ボックス">
-   {deliverySearchIds.length>0&&<div className="delivery-search-results" role="status" aria-live="polite">
+   </div>}
+  <section id="completion-box" tabIndex={allCompletions?0:-1} className="completion-box" aria-label={allCompletions?"完成品の自動一覧":"完成ボックス"}>
+   {allCompletions?<div className="all-completion-list">
+     {completionItems.length===0&&<p className="completion-empty">完成品なし</p>}
+     {[...completionItems].sort((a,b)=>a.creationOrdinal-b.creationOrdinal).map(item=>{
+       const record=records.find(record=>record.entityKey===item.entityKey);
+       const status=deliveryStatus(record,true,now);
+       const seconds=Math.ceil(Math.max(0,(record?.serveDeadlineAt??now)-now)/1000);
+       const remaining=`${String(Math.floor(seconds/60)).padStart(2,"0")}:${String(seconds%60).padStart(2,"0")}`;
+       const id=record?.id??item.id;
+       return <div key={item.entityKey} className={`all-completion-row is-${status}`}>
+         <span className="all-completion-id">{id}</span><strong>{deliveryStatusLabels[status]}</strong>
+         <time aria-label={`ID ${id} の残り時間 ${remaining}`}>{remaining}</time>
+         <button type="button" className="serve-button" aria-label={`ID ${id} の管理終了`} disabled={!available||isItemPending(item)} onClick={()=>serveCompletion(item.entityKey)}>管理終了</button>
+       </div>;
+     })}
+   </div>:deliverySearchIds.length>0&&<div className="delivery-search-results" role="status" aria-live="polite">
      {deliverySearchMatches.map(match=>{
        const record=records.find(record=>record.entityKey===match.entityKey);
        const remainingSeconds=match.status==="available"&&record?.serveDeadlineAt!==null&&record?.serveDeadlineAt!==undefined?Math.ceil(Math.max(0,record.serveDeadlineAt-now)/1000):0;
@@ -677,7 +722,12 @@ export default function Kitchen() {
 }
 
 export function PagesKitchen() {
- return <KitchenView useController={useKitchenLocal}/>;
+ return <KitchenView useController={usePagesKitchenController}/>;
+}
+
+function usePagesKitchenController() {
+ const [variant]=useState(()=>resolveCompletionVariant(window.location.search));
+ return useKitchenLocal(variant);
 }
 
 

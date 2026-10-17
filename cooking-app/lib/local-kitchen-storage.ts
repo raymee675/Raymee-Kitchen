@@ -1,9 +1,13 @@
 import { DOUGH_ID_BLOCK_SIZE, INITIAL_BOARD_GENERATION, LEGACY_OVAL_RX, LEGACY_OVAL_RY, isArchiveId, isPancakeId, normalizeBoardData, type CompletionItem, type DoughBatchState, type ExecutionRecord, type Pancake, type Snapshot, type StoredPancake, type UndoEntry } from "./kitchen-model";
+import type { CompletionVariant } from "./completion-variant";
 
 const siteSegment = typeof window === "undefined"
   ? "root"
   : encodeURIComponent(window.location.pathname.split("/").filter(Boolean)[0] ?? "root");
 export const LOCAL_BOARD_KEY = `teppan-timer:${siteSegment}:single-phone-board:v1`;
+export function localBoardKey(variant:CompletionVariant = "recall"):string {
+  return variant === "all" ? `${LOCAL_BOARD_KEY}:completion-all` : LOCAL_BOARD_KEY;
+}
 export const LOCAL_BOARD_SCHEMA = 13;
 export const LOCAL_BACKUP_FORMAT = "teppan-timer-pages-board";
 export const LOCAL_BACKUP_FORMAT_VERSION = 1;
@@ -30,6 +34,7 @@ type StoredBoard = {
 
 export type ParsedLocalBoardBackup = {
   exportedAt: number;
+  completionVariant:CompletionVariant;
   snapshot: Snapshot;
 };
 
@@ -153,33 +158,41 @@ function toStoredBoard(snapshot: Snapshot): StoredBoard {
   };
 }
 
-export function createLocalBoardBackup(snapshot: Snapshot, exportedAt = Date.now()): string {
+export function createLocalBoardBackup(snapshot: Snapshot, exportedAt = Date.now(), variant:CompletionVariant = "recall"): string {
   if (!Number.isSafeInteger(exportedAt) || exportedAt < 0) throw new Error("バックアップ日時が正しくありません。");
   return JSON.stringify({
     format: LOCAL_BACKUP_FORMAT,
-    formatVersion: LOCAL_BACKUP_FORMAT_VERSION,
+    formatVersion: variant === "all" ? 2 : LOCAL_BACKUP_FORMAT_VERSION,
+    ...(variant === "all" ? {completionVariant:variant} : {}),
     exportedAt,
     board: toStoredBoard(snapshot),
   }, null, 2);
 }
 
-export function parseLocalBoardBackup(raw: string): ParsedLocalBoardBackup {
+export function parseLocalBoardBackup(raw: string, variant:CompletionVariant = "recall"): ParsedLocalBoardBackup {
   let value: unknown;
   try {
     value = JSON.parse(raw);
   } catch {
     throw new Error("JSONバックアップを読み取れません。現在の盤面は変更していません。");
   }
-  if (!isRecord(value) || value.format !== LOCAL_BACKUP_FORMAT || value.formatVersion !== LOCAL_BACKUP_FORMAT_VERSION
+  if (!isRecord(value) || value.format !== LOCAL_BACKUP_FORMAT || (value.formatVersion !== LOCAL_BACKUP_FORMAT_VERSION && value.formatVersion !== 2)
     || !Number.isSafeInteger(value.exportedAt) || (value.exportedAt as number) < 0
     || !Number.isFinite(new Date(value.exportedAt as number).getTime()) || !isRecord(value.board)) {
     throw new Error("対応していないバックアップ形式です。現在の盤面は変更していません。");
   }
+  const backupVariant:CompletionVariant = value.formatVersion === 1 ? "recall" : "all";
+  if ((value.formatVersion === 2 && value.completionVariant !== "all")
+    || (value.formatVersion === 1 && value.completionVariant !== undefined && value.completionVariant !== "recall")) {
+    throw new Error("バックアップの提供ボックス方式が正しくありません。現在の盤面は変更していません。");
+  }
+  if (backupVariant !== variant) throw new Error("別方式のバックアップは復元できません。対応する提供ボックス方式に切り替えてください。");
 
   try {
     const stored = decode(JSON.stringify(value.board));
     return {
       exportedAt: value.exportedAt as number,
+      completionVariant:backupVariant,
       snapshot: {
         revision: stored.revision,
         generation:stored.generation,
@@ -201,14 +214,15 @@ export function parseLocalBoardBackup(raw: string): ParsedLocalBoardBackup {
 
 type BoardStorage = Pick<Storage, "getItem"> & Partial<Pick<Storage, "setItem">>;
 
-export function readLocalBoard(storage: BoardStorage = window.localStorage): Snapshot {
-  const raw = storage.getItem(LOCAL_BOARD_KEY);
+export function readLocalBoard(storage: BoardStorage = window.localStorage, variant:CompletionVariant = "recall"): Snapshot {
+  const key = localBoardKey(variant);
+  const raw = storage.getItem(key);
   const stored = decode(raw);
   if (raw !== null && storage.setItem) {
     const canonical = JSON.stringify(stored);
     if (raw !== canonical) {
       try {
-        storage.setItem(LOCAL_BOARD_KEY, canonical);
+        storage.setItem(key, canonical);
       } catch {
         // A failed opportunistic migration must not hide a readable saved board.
       }
@@ -217,12 +231,12 @@ export function readLocalBoard(storage: BoardStorage = window.localStorage): Sna
   return { revision: stored.revision, generation:stored.generation, items: stored.items, records:stored.records, completionItems:stored.completionItems, nextPancakeOrdinal:stored.nextPancakeOrdinal, nextCreationOrdinal:stored.nextCreationOrdinal, undoHistory:stored.undoHistory, doughBatch:stored.doughBatch, serverNow: Date.now() };
 }
 
-export function writeLocalBoard(snapshot: Snapshot, storage: Pick<Storage, "setItem"> = window.localStorage): void {
-  storage.setItem(LOCAL_BOARD_KEY, JSON.stringify(toStoredBoard(snapshot)));
+export function writeLocalBoard(snapshot: Snapshot, storage: Pick<Storage, "setItem"> = window.localStorage, variant:CompletionVariant = "recall"): void {
+  storage.setItem(localBoardKey(variant), JSON.stringify(toStoredBoard(snapshot)));
 }
 
-export function resetUnreadableLegacyDoughBoard(expectedRaw: string, storage: Pick<Storage, "getItem" | "setItem"> = window.localStorage): Snapshot {
-  const currentRaw = storage.getItem(LOCAL_BOARD_KEY);
+export function resetUnreadableLegacyDoughBoard(expectedRaw: string, storage: Pick<Storage, "getItem" | "setItem"> = window.localStorage, variant:CompletionVariant = "recall"): Snapshot {
+  const currentRaw = storage.getItem(localBoardKey(variant));
   if (currentRaw === null || currentRaw !== expectedRaw) {
     throw new Error("保存データが変わっています。画面を開き直して状態を確認してください。");
   }
@@ -265,6 +279,6 @@ export function resetUnreadableLegacyDoughBoard(expectedRaw: string, storage: Pi
     doughBatch:null,
     serverNow:now,
   };
-  writeLocalBoard(reset, storage);
+  writeLocalBoard(reset, storage, variant);
   return reset;
 }

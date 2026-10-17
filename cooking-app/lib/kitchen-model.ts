@@ -91,7 +91,8 @@ export type Command =
   | { operationId: string; expectedGeneration?: number; type: "doughStart"; expectedDoughBatchId: null; expectedNextPancakeOrdinal: number }
   | { operationId: string; expectedGeneration?: number; type: "doughReset"; expectedDoughBatchId: string; expectedNextPancakeOrdinal: number }
   | { operationId: string; expectedGeneration?: number; type: "doughDiscardAndStart"; expectedDoughBatchId: string; expectedNextPancakeOrdinal: number }
-  | { operationId: string; expectedGeneration?: number; type: "start" | "remove"; id: string; expectedVersion: number }
+  | { operationId: string; expectedGeneration?: number; type: "start"; id: string; expectedVersion: number }
+  | { operationId: string; expectedGeneration?: number; type: "remove"; id: string; expectedVersion: number; expectedEntityKey?:string }
   | { operationId: string; expectedGeneration?: number; type: "recall"; id: string; expectedVersion: number; expectedEntityKey: string }
   | { operationId: string; expectedGeneration:number; type:"reposition"; id:string; expectedVersion:number; expectedEntityKey:string; plate:1|2; x:number; y:number }
   | { operationId: string; expectedGeneration?: number; type: "move"; id: string; expectedVersion: number; plate: 1 | 2; x: number; y: number }
@@ -1265,7 +1266,11 @@ export function parseCommand(input: unknown): Command {
   }
   if ((c.type === "start" || c.type === "remove" || c.type === "adjust" || c.type === "move") && isPancakeId(c.id) && Number.isSafeInteger(c.expectedVersion) && (c.expectedVersion as number) > 0) {
     const base = { operationId:c.operationId, id:c.id, expectedVersion:c.expectedVersion as number };
-    if (c.type === "start" || c.type === "remove") return withGeneration({...base, type:c.type});
+    if (c.type === "start") return withGeneration({...base, type:c.type});
+    if (c.type === "remove") {
+      if (c.expectedEntityKey !== undefined && !isEntityKey(c.expectedEntityKey)) throw new KitchenError("invalid", "取り出し対象の識別子が正しくありません。", 400);
+      return withGeneration({...base, type:c.type, ...(c.expectedEntityKey !== undefined ? {expectedEntityKey:c.expectedEntityKey as string} : {})});
+    }
     if (c.type === "adjust" && (c.delta === -1 || c.delta === 1)) return withGeneration({...base, type:c.type, delta:c.delta});
     if (c.type === "move" && (c.plate === 1 || c.plate === 2) && typeof c.x === "number" && typeof c.y === "number" && Number.isFinite(c.x) && Number.isFinite(c.y) && c.x >= 0 && c.x <= 1 && c.y >= 0 && c.y <= 1) {
       return withGeneration({...base, type:c.type, plate:c.plate, x:c.x, y:c.y});
@@ -1565,6 +1570,7 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
   if (command.type === "remove") {
     const completionItem = completionItems.find(item => item.id === command.id);
     if (completionItem) {
+      if (command.expectedEntityKey !== undefined && completionItem.entityKey !== command.expectedEntityKey) throw new KitchenError("conflict", "管理終了の対象が更新されています。最新の表示でもう一度操作してください。");
       if (completionItem.version !== command.expectedVersion) throw new KitchenError("conflict", "完成ボックスの状態が更新されています。最新の表示でもう一度操作してください。");
       const record = records.find(item => item.entityKey === completionItem.entityKey);
       if (!record || record.serveDeadlineAt === null || record.serveTimerStartedAt === null) {
@@ -1575,8 +1581,11 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
       const updated = serveAt < deadline
         ? {...record, servedAt:serveAt}
         : {...record, unavailableAt:deadline, unavailableReason:COMPLETION_EXPIRED_REASON};
+      const generation = command.expectedEntityKey !== undefined ? base.generation + 1 : base.generation;
+      if (!Number.isSafeInteger(generation)) throw new KitchenError("invalid_state", "盤面世代が上限に達したため管理を終了できません。");
       return normalizeChangedBoard({
         ...base,
+        generation,
         items:canonicalItems,
         records:records.map(item => item.entityKey === updated.entityKey ? updated : item),
         completionItems:completionItems.filter(item => item.entityKey !== completionItem.entityKey),
@@ -1586,6 +1595,7 @@ export function applySnapshotCommand(snapshot: Snapshot, command: Command, now: 
   }
   const item = canonicalItems.find(i => i.id === command.id);
   if (!item) throw new KitchenError("removed", "このお好み焼きは取り出されています。");
+  if (command.type === "remove" && command.expectedEntityKey !== undefined && item.entityKey !== command.expectedEntityKey) throw new KitchenError("conflict", "取り出し対象のIDが更新されています。最新の表示でもう一度操作してください。");
   if (command.type === "start" && item.startedAt !== null) return {...base, items:canonicalItems, records, completionItems};
   if (item.version !== command.expectedVersion) throw new KitchenError("conflict", "別の端末で変更されました。最新の表示でもう一度操作してください。");
   if (command.type === "reposition" && item.entityKey !== command.expectedEntityKey) throw new KitchenError("conflict", "移動対象のIDが更新されています。最新の表示でもう一度操作してください。");

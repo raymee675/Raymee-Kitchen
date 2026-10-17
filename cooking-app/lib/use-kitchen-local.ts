@@ -1,15 +1,18 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { showKitchenError } from "./kitchen-notification";
-import { applySnapshotCommand, parseCommand, settleUnsearchedCompletions, type Command, type Snapshot } from "./kitchen-model";
+import { applySnapshotCommand, parseCommand, type Command, type Snapshot } from "./kitchen-model";
 import { createLocalTimestampClock } from "./local-timestamp-clock";
-import { LegacyDoughTimerResetRequiredError, LOCAL_BOARD_KEY, readLocalBoard, resetUnreadableLegacyDoughBoard, writeLocalBoard, type ParsedLocalBoardBackup } from "./local-kitchen-storage";
+import { settleForCompletionVariant, type CompletionVariant } from "./completion-variant";
+import { LegacyDoughTimerResetRequiredError, localBoardKey, readLocalBoard, resetUnreadableLegacyDoughBoard, writeLocalBoard, type ParsedLocalBoardBackup } from "./local-kitchen-storage";
 
-const EDITOR_LOCK = `${LOCAL_BOARD_KEY}:editor`;
+
 
 type CacheState = "preparing" | "ready" | "unavailable";
 
-export function useKitchenLocal() {
+export function useKitchenLocal(variant:CompletionVariant = "recall") {
+  const boardKey = localBoardKey(variant);
+  const editorLock = `${boardKey}:editor`;
   const lockSupported = typeof navigator !== "undefined" && "locks" in navigator;
   const serviceWorkerSupported = typeof navigator !== "undefined" && "serviceWorker" in navigator;
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
@@ -55,7 +58,7 @@ export function useKitchenLocal() {
       setLegacyDoughResetAvailable(false);
       if (activeEditor.current) {
         try {
-          const raw = window.localStorage.getItem(LOCAL_BOARD_KEY);
+          const raw = window.localStorage.getItem(boardKey);
           if (raw !== null) {
             legacyDoughResetSourceRaw.current = raw;
             setLegacyDoughResetAvailable(true);
@@ -73,7 +76,7 @@ export function useKitchenLocal() {
 
     try {
       const storage = window.localStorage;
-      const raw = storage.getItem(LOCAL_BOARD_KEY);
+      const raw = storage.getItem(boardKey);
       if (raw === null) return false;
       recoverySourceRaw.current = raw;
       setRecoveryAvailable(true);
@@ -81,12 +84,12 @@ export function useKitchenLocal() {
     } catch {
       return false;
     }
-  }, []);
+  }, [boardKey]);
 
   const saveSettlement = useCallback((current:Snapshot, time:number) => {
-    const next = settleUnsearchedCompletions(current, time);
+    const next = settleForCompletionVariant(current, time, variant);
     if (next !== current) {
-      try { writeLocalBoard(next); }
+      try { writeLocalBoard(next, undefined, variant); }
       catch (error) {
         writeFailed.current = true;
         setConnection("offline");
@@ -95,7 +98,7 @@ export function useKitchenLocal() {
       }
     }
     return next;
-  }, []);
+  }, [variant]);
 
   const sync = useCallback(():Promise<void> => {
     if (syncing.current) return syncing.current;
@@ -105,7 +108,7 @@ export function useKitchenLocal() {
     const operation = mutationQueue.current.then(() => {
       if (!activeEditor.current || writeFailed.current) throw new Error("端末へ保存できません。画面を開き直してください。");
       const time = currentTime();
-      publish({...saveSettlement(readLocalBoard(), time), serverNow:time});
+      publish({...saveSettlement(readLocalBoard(undefined, variant), time), serverNow:time});
       recoverySourceRaw.current = null;
       legacyDoughResetSourceRaw.current = null;
       setRecoveryAvailable(false);
@@ -125,7 +128,7 @@ export function useKitchenLocal() {
     mutationQueue.current = operation.then(() => undefined, () => undefined);
     syncing.current = operation.finally(() => { syncing.current = null; });
     return syncing.current;
-  }, [currentTime, prepareUnreadableBoardRecovery, publish, saveSettlement]);
+  }, [currentTime, prepareUnreadableBoardRecovery, publish, saveSettlement, variant]);
 
   useEffect(() => {
     alive.current = true;
@@ -134,7 +137,7 @@ export function useKitchenLocal() {
     let disposed = false;
     let releaseLock: (() => void) | null = null;
     const lockStart = window.setTimeout(() => {
-      void navigator.locks.request(EDITOR_LOCK, { mode: "exclusive", ifAvailable: true }, async lock => {
+      void navigator.locks.request(editorLock, { mode: "exclusive", ifAvailable: true }, async lock => {
         if (disposed || !alive.current) return;
         if (!lock) {
           setConnection("offline");
@@ -165,7 +168,7 @@ export function useKitchenLocal() {
         const time = currentTime();
         setNow(time);
         const current = state.current;
-        if (current && activeEditor.current && !writeFailed.current && !backupRestoreInProgress.current && !syncing.current) {
+        if (variant === "recall" && current && activeEditor.current && !writeFailed.current && !backupRestoreInProgress.current && !syncing.current) {
           const recordsByKey = new Map(current.records.map(record => [record.entityKey, record]));
           if (current.completionItems.some(item => {
             const record = recordsByKey.get(item.entityKey);
@@ -181,7 +184,7 @@ export function useKitchenLocal() {
       }
     };
     const refreshOnStorage = (event: StorageEvent) => {
-      if (event.key === LOCAL_BOARD_KEY) void sync().catch(() => {});
+      if (event.key === boardKey) void sync().catch(() => {});
     };
     document.addEventListener("visibilitychange", refreshOnResume);
     window.addEventListener("pageshow", refreshOnResume);
@@ -198,7 +201,7 @@ export function useKitchenLocal() {
       window.removeEventListener("pageshow", refreshOnResume);
       window.removeEventListener("storage", refreshOnStorage);
     };
-  }, [currentTime, lockSupported, prepareUnreadableBoardRecovery, publish, resumeClock, sync]);
+  }, [boardKey, currentTime, editorLock, lockSupported, prepareUnreadableBoardRecovery, publish, resumeClock, sync, variant]);
 
   useEffect(() => {
     if (!serviceWorkerSupported) return;
@@ -260,7 +263,7 @@ export function useKitchenLocal() {
     const operation = mutationQueue.current.then(() => {
       if (!activeEditor.current || writeFailed.current) throw new Error("操作を保存できません。アプリを開き直してください。");
       const now = currentTime();
-      const current = saveSettlement(readLocalBoard(), now);
+      const current = saveSettlement(readLocalBoard(undefined, variant), now);
       publish(current);
       const applied = applySnapshotCommand(current, command, now);
       const next: Snapshot = {
@@ -276,7 +279,7 @@ export function useKitchenLocal() {
         serverNow: now,
       };
       if (!Number.isSafeInteger(next.revision)) throw new Error("保存データの更新番号が上限に達したため保存できません。");
-      writeLocalBoard(next);
+      writeLocalBoard(next, undefined, variant);
       publish(next);
       setStatusMessage(null);
       setConnection("online");
@@ -304,16 +307,17 @@ export function useKitchenLocal() {
         setStatusMessage(message);
         setConnection("offline");
       }
-      try { publish(readLocalBoard()); } catch { /* Preserve the last confirmed view if storage cannot be reread. */ }
+      try { publish(readLocalBoard(undefined, variant)); } catch { /* Preserve the last confirmed view if storage cannot be reread. */ }
       showKitchenError(message);
       throw error;
     }).finally(() => {
       pending.current.delete(pendingKey);
       if (alive.current) setPendingIds(new Set(pending.current));
     });
-  }, [currentTime, legacyDoughResetRequired, prepareUnreadableBoardRecovery, publish, saveSettlement]);
+  }, [currentTime, legacyDoughResetRequired, prepareUnreadableBoardRecovery, publish, saveSettlement, variant]);
 
   const restoreBackup = useCallback((backup: ParsedLocalBoardBackup, expectedRevision: number|null): Promise<Snapshot> => {
+    if (backup.completionVariant !== variant) throw new Error("別方式のバックアップは復元できません。");
     if (legacyDoughResetRequired) throw new Error("旧24個タイマーの未完了セットがあるため、バックアップ復元は停止しています。全体リセットが必要です。");
     const recoveringUnreadableBoard = expectedRevision === null;
     if (!activeEditor.current || (!state.current && !recoveringUnreadableBoard)) throw new Error("保存画面の準備ができていません。画面を開き直してください。");
@@ -331,7 +335,7 @@ export function useKitchenLocal() {
       let revisionBase: number;
       let generationBase: number;
       if (recoveringUnreadableBoard) {
-        const currentRaw = window.localStorage.getItem(LOCAL_BOARD_KEY);
+        const currentRaw = window.localStorage.getItem(boardKey);
         if (currentRaw === null || currentRaw !== recoverySourceRaw.current) {
           recoverySourceRaw.current = null;
           setRecoveryAvailable(false);
@@ -350,7 +354,7 @@ export function useKitchenLocal() {
           // A malformed board has no trusted counters; the backup and last in-memory state are the fallback.
         }
       } else {
-        const current = readLocalBoard();
+        const current = readLocalBoard(undefined, variant);
         if (current.revision !== expectedRevision) throw new Error("盤面が更新されています。内容を確認してから、もう一度復元してください。");
         revisionBase = current.revision;
         generationBase = current.generation;
@@ -360,13 +364,13 @@ export function useKitchenLocal() {
       if (!Number.isSafeInteger(revision) || !Number.isSafeInteger(generation)) throw new Error("盤面の更新番号が上限に達したため復元できません。");
 
       const now = currentTime();
-      const next = settleUnsearchedCompletions({
+      const next = settleForCompletionVariant({
         ...backup.snapshot,
         revision,
         generation,
         serverNow:now,
-      }, now);
-      writeLocalBoard(next);
+      }, now, variant);
+      writeLocalBoard(next, undefined, variant);
       writeFailed.current = false;
       recoverySourceRaw.current = null;
       setRecoveryAvailable(false);
@@ -384,7 +388,7 @@ export function useKitchenLocal() {
         let canRetryUnreadableBoardRecovery = false;
         if (recoveringUnreadableBoard && activeEditor.current && recoverySourceRaw.current !== null) {
           try {
-            canRetryUnreadableBoardRecovery = window.localStorage.getItem(LOCAL_BOARD_KEY) === recoverySourceRaw.current;
+            canRetryUnreadableBoardRecovery = window.localStorage.getItem(boardKey) === recoverySourceRaw.current;
           } catch {
             canRetryUnreadableBoardRecovery = false;
           }
@@ -423,7 +427,7 @@ export function useKitchenLocal() {
         setPendingIds(new Set(pending.current));
       }
     });
-  }, [currentTime, legacyDoughResetRequired, prepareUnreadableBoardRecovery, publish, recoveryAvailable]);
+  }, [boardKey, currentTime, legacyDoughResetRequired, prepareUnreadableBoardRecovery, publish, recoveryAvailable, variant]);
 
   const resetLegacyDoughData = useCallback((): Promise<Snapshot> => {
     if (!activeEditor.current || !legacyDoughResetRequired || !legacyDoughResetSourceRaw.current) {
@@ -439,7 +443,7 @@ export function useKitchenLocal() {
     setPendingIds(new Set(pending.current));
     const operation = mutationQueue.current.then(() => {
       if (!activeEditor.current) throw new Error("操作を保存できません。アプリを開き直してください。");
-      const next = resetUnreadableLegacyDoughBoard(expectedRaw);
+      const next = resetUnreadableLegacyDoughBoard(expectedRaw, undefined, variant);
       writeFailed.current = false;
       legacyDoughResetSourceRaw.current = null;
       recoverySourceRaw.current = null;
@@ -457,7 +461,7 @@ export function useKitchenLocal() {
       const message = error instanceof Error ? error.message : "全体リセットを保存できませんでした。";
       let sourceStillMatches = false;
       try {
-        sourceStillMatches = activeEditor.current && window.localStorage.getItem(LOCAL_BOARD_KEY) === expectedRaw;
+        sourceStillMatches = activeEditor.current && window.localStorage.getItem(boardKey) === expectedRaw;
       } catch {
         sourceStillMatches = false;
       }
@@ -482,7 +486,7 @@ export function useKitchenLocal() {
       pending.current.delete(pendingKey);
       if (alive.current) setPendingIds(new Set(pending.current));
     });
-  }, [legacyDoughResetRequired, publish]);
+  }, [boardKey, legacyDoughResetRequired, publish, variant]);
 
   const applyUpdate = useCallback(() => {
     const waiting = registration.current?.waiting;
@@ -492,6 +496,8 @@ export function useKitchenLocal() {
   }, []);
 
   return {
+    completionVariant:variant,
+    waitForIdle: async () => { await mutationQueue.current; },
     snapshot,
     now,
     connection,
@@ -523,7 +529,7 @@ export function useKitchenLocal() {
       const time = currentTime();
       // A recovery export may derive results from the last confirmed snapshot;
       // it never publishes that derived state or claims it has been saved.
-      return {...settleUnsearchedCompletions(state.current, time), serverNow:time};
+      return {...settleForCompletionVariant(state.current, time, variant), serverNow:time};
     },
     currentTime,
     getSnapshot: () => state.current,

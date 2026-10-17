@@ -194,6 +194,25 @@
 .serve-button:disabled{opacity:.5}
 .dismiss-delivery-button{display:grid;place-items:center;flex-shrink:0;width:28px;height:28px;padding:0;border:1px solid #cbd1d7;border-radius:6px;background:#fff;color:#59636d;font:inherit;font-size:20px;line-height:1;cursor:pointer}
 .dismiss-delivery-button:focus-visible{outline:3px solid #f2a36d;outline-offset:2px}
+.completion-variant-choice{margin:0 0 12px;padding:10px;border:1px solid #d9dee2;border-radius:8px}
+.completion-variant-choice legend{padding:0 4px;font-size:14px;font-weight:700}
+.completion-variant-choice>div{display:flex;gap:8px}
+.completion-variant-choice button{min-height:36px;padding:6px 14px;border:1px solid #cbd1d7;border-radius:6px;background:#fff;font:inherit;font-size:14px;cursor:pointer}
+.completion-variant-choice button[aria-pressed=true]{border-color:#b45b2d;background:#fff2e5;color:#713912;font-weight:700}
+.completion-variant-choice:disabled button{opacity:.5;cursor:default}
+.completion-variant-choice p{margin:8px 0 0;color:#68727c;font-size:12px;line-height:1.5}
+.all-completions-kitchen .workspace-controls{grid-template-columns:198px minmax(0,1fr)}
+.all-completions-kitchen .completion-box{height:112px;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;touch-action:pan-y;scrollbar-gutter:stable}
+.all-completions-kitchen .completion-box:focus-visible{outline:3px solid #f2a36d;outline-offset:2px}
+.all-completion-list{display:grid;align-content:start;gap:4px;min-width:0}
+.all-completion-row{display:grid;grid-template-columns:minmax(36px,1fr) auto auto auto;align-items:center;gap:6px;min-height:32px;padding:2px 0;border-bottom:1px solid #edf0f2}
+.all-completion-id{min-width:0;overflow-wrap:anywhere;font-family:ui-monospace,Consolas,monospace;font-size:14px;font-weight:700}
+.all-completion-row>strong{padding:3px 5px;border-radius:6px;background:#e7f3ec;color:#23643d;font-size:12px;white-space:nowrap}
+.all-completion-row.is-unavailable>strong{background:#dceefa;color:#164c70}
+.all-completion-row time{font-size:15px;font-weight:700;font-variant-numeric:tabular-nums}
+.all-completion-row .serve-button{min-height:30px;padding:3px 6px;font-size:12px}
+@media(orientation:portrait){.all-completions-kitchen .workspace-controls{grid-template-columns:minmax(0,1fr)}.all-completions-kitchen .control-left{max-width:198px}.all-completions-kitchen .completion-box{grid-column:1/-1;height:clamp(100px,24svh,180px)}}
+@media(orientation:landscape) and (max-height:420px){.all-completions-kitchen .completion-box{height:82px}}
 [data-sonner-toaster].kitchen-notifications{width:min(260px,calc(100vw - 16px));left:auto;right:max(8px,env(safe-area-inset-right));bottom:max(8px,env(safe-area-inset-bottom));pointer-events:none!important}
 [data-sonner-toaster].kitchen-notifications *{pointer-events:none!important}
 [data-sonner-toaster].kitchen-notifications [data-sonner-toast]{width:100%;padding:7px 9px;gap:6px;border:1px solid #cbd1d780;border-radius:6px;background:#ffffffe0;color:#704417;font-size:11px;line-height:1.4;box-shadow:0 2px 8px #00000012}
